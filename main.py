@@ -1,5 +1,6 @@
 import os
 import io
+import traceback
 import uuid
 import re
 import csv
@@ -87,79 +88,141 @@ def find_cameras(max_index=5):
 CAMERA_INDEXES = find_cameras(5)
 
 # --- Google Cloud Vision OCR ---
+# --- Google Cloud Vision OCR (Improved Block Iteration) ---
 def detect_text(image_path):
-    """Detects text (potential number plate) in an image, handling standard Indian and BH series formats."""
-    # Ensure client is initialized (it should be if GOOGLE_APPLICATION_CREDENTIALS is set)
+    """
+    Detects text (potential number plate) in an image by iterating through
+    detected text blocks and applying format regex. Handles standard Indian
+    and BH series formats.
+    """
     try:
         v_client = vision.ImageAnnotatorClient()
     except Exception as e:
-        print(f"Error initializing Vision Client: {e}")
+        print(f"[ERROR] Initializing Vision Client: {e}")
         return f"OCR Failed: Vision Client Init Error - {e}"
 
     try:
+        if not os.path.exists(image_path):
+             raise FileNotFoundError(f"Image file not found at path: {image_path}")
+
         with io.open(image_path, 'rb') as f:
             content = f.read()
         image = vision.Image(content=content)
-        resp = v_client.text_detection(image=image)
-        texts = resp.text_annotations
+
+        # --- Add Language Hints ---
+        # Helps the API prioritize expected characters.
+        # 'en' for English characters commonly on Indian plates.
+        # Add 'hi' if Devanagari script might appear and needs detection.
+        image_context = vision.ImageContext(language_hints=["en"])
+
+        # --- Perform Text Detection ---
+        response = v_client.text_detection(image=image, image_context=image_context)
+        texts = response.text_annotations # List of TextAnnotation objects
+
+        if response.error.message:
+             raise Exception(f"Vision API Error: {response.error.message}")
 
         if not texts:
-            print("Vision API found no text.")
-            return ""
+            print("[INFO] Vision API found no text.")
+            return "" # Return empty if nothing detected
 
-        # --- Text Processing ---
-        raw = texts[0].description.upper() # Convert to uppercase immediately
-        # Keep only A-Z, 0-9. Remove spaces, hyphens, and other symbols early.
-        compact_raw = re.sub(r'[^A-Z0-9]', '', raw)
+        print(f"[INFO] Vision API returned {len(texts)} text blocks.")
+        # texts[0] is the full detected text, texts[1:] are individual blocks/words/lines
 
-        print(f"Raw detected text: '{raw}'")
-        print(f"Cleaned compact text: '{compact_raw}'")
+        # --- Iterate through detected blocks (starting from index 1) ---
+        # Often, individual blocks are cleaner than the combined text[0]
+        possible_plates = []
+        for i, text in enumerate(texts):
+             # Skip the first annotation (index 0) which is the full text block
+             if i == 0:
+                  print(f"[DEBUG] Full text (texts[0]): '{text.description.replace('\n', ' ')}'")
+                  continue # Skip the full text block for individual regex matching
 
-        # --- Regex Matching ---
-        # Using ^ and $ for stricter matching on the cleaned string
+             block_text = text.description.upper()
+             print(f"[DEBUG] Checking Block {i}: '{block_text}'")
 
-        # 1. Check for BH Series Format (e.g., 25BH4567AB)
-        bh_match = re.search(r'^(\d{2})(BH)(\d{4})([A-Z]{1,2})$', compact_raw)
-        if bh_match:
-            year, bh_marker, nums, letters = bh_match.groups()
-            formatted_plate = f"{year}-{bh_marker}-{nums}-{letters}" # Consistent format
-            print(f"Formatted plate (BH series regex match): {formatted_plate}")
-            return formatted_plate
+             # --- Text Processing for the block ---
+             # Remove spaces, hyphens, and non-alphanumeric chars for regex matching
+             compact_raw = re.sub(r'[^A-Z0-9]', '', block_text)
 
-        # 2. Check for Standard Indian Format (e.g., KA01AB1234 or MH05X9876)
-        standard_match = re.search(r'^([A-Z]{2})(\d{1,2})([A-Z]{1,2})?(\d{3,4})$', compact_raw)
-        if standard_match:
-            state, rto, letters, nums = standard_match.groups()
-            rto_padded = rto.rjust(2, '0')
-            nums_padded = nums.rjust(4, '0')
-            # Use 'XX' as placeholder if letters part is missing/not matched
-            letters_formatted = letters if letters else 'XX'
-            formatted_plate = f"{state}-{rto_padded}-{letters_formatted}-{nums_padded}"
-            print(f"Formatted plate (Standard regex match): {formatted_plate}")
-            return formatted_plate
+             if not compact_raw: # Skip empty blocks after cleaning
+                 continue
 
-        # 3. Fallback - Return the cleaned compact text if it seems plausible
-        print("No structured regex (BH or Standard) matched.")
-        if 4 <= len(compact_raw) <= 10: # Basic length check
-            print("Returning cleaned compact text as potential plate.")
-            return compact_raw
+             print(f"[DEBUG] Cleaned Block {i}: '{compact_raw}'")
+
+             # --- Regex Matching on the compact block text ---
+
+             # 1. Check for BH Series Format
+             bh_match = re.search(r'^(\d{2})(BH)(\d{4})([A-Z]{1,2})$', compact_raw)
+             if bh_match:
+                 year, bh_marker, nums, letters = bh_match.groups()
+                 formatted_plate = f"{year}-{bh_marker}-{nums}-{letters}"
+                 print(f"[INFO] Found BH plate in block {i}: {formatted_plate}")
+                 possible_plates.append(formatted_plate)
+                 continue # Found BH, check next block for potentially better read
+
+             # 2. Check for Standard Indian Format
+             standard_match = re.search(r'^([A-Z]{2})(\d{1,2})([A-Z]{1,2})?(\d{3,4})$', compact_raw)
+             if standard_match:
+                 state, rto, letters, nums = standard_match.groups()
+                 rto_padded = rto.rjust(2, '0')
+                 nums_padded = nums.rjust(4, '0')
+                 letters_formatted = letters if letters else 'XX'
+                 formatted_plate = f"{state}-{rto_padded}-{letters_formatted}-{nums_padded}"
+                 print(f"[INFO] Found Standard plate in block {i}: {formatted_plate}")
+                 possible_plates.append(formatted_plate)
+                 continue # Found Standard, check next block
+
+             # 3. Fallback Check (Plausible compact text)
+             # Check if the *compact* block itself looks like a plate
+             if 6 <= len(compact_raw) <= 10 and re.search(r'\d', compact_raw) and re.search(r'[A-Z]', compact_raw):
+                 print(f"[INFO] Found potential fallback plate in block {i}: {compact_raw}")
+                 possible_plates.append(compact_raw) # Add the compact version as potential fallback
+
+
+        # --- Select the best candidate ---
+        if possible_plates:
+             # Prioritize formatted plates over compact fallbacks
+             # Prioritize longer plates (less likely to be fragments)
+             # Simple approach: return the first formatted plate found, or the first fallback if no formatted ones.
+             # More sophisticated: score candidates based on format, length, confidence (if available)
+             best_plate = possible_plates[0] # Start with the first found
+             print(f"[INFO] Selecting best plate from candidates: {possible_plates} -> {best_plate}")
+             return best_plate
         else:
-            print("Cleaned text doesn't resemble a typical plate length. Returning empty.")
-            return "" # Return empty if it's unlikely to be a plate
+             print("[WARN] No text blocks matched expected plate formats.")
+             # Optional: Try regex on the full text block (texts[0]) as a last resort
+             if texts:
+                  full_text_raw = texts[0].description.upper()
+                  full_compact_raw = re.sub(r'[^A-Z0-9]', '', full_text_raw)
+                  print(f"[DEBUG] Last resort check on full text: '{full_compact_raw}'")
+                  bh_match = re.search(r'(\d{2})(BH)(\d{4})([A-Z]{1,2})', full_compact_raw) # Less strict search
+                  if bh_match:
+                      year, bh_marker, nums, letters = bh_match.groups()
+                      formatted_plate = f"{year}-{bh_marker}-{nums}-{letters}"
+                      print(f"[INFO] Found BH plate in full text (last resort): {formatted_plate}")
+                      return formatted_plate
+                  standard_match = re.search(r'([A-Z]{2})(\d{1,2})([A-Z]{1,2})?(\d{3,4})', full_compact_raw) # Less strict search
+                  if standard_match:
+                      state, rto, letters, nums = standard_match.groups()
+                      rto_padded = rto.rjust(2, '0'); nums_padded = nums.rjust(4, '0')
+                      letters_formatted = letters if letters else 'XX'
+                      formatted_plate = f"{state}-{rto_padded}-{letters_formatted}-{nums_padded}"
+                      print(f"[INFO] Found Standard plate in full text (last resort): {formatted_plate}")
+                      return formatted_plate
+
+             return "" # Truly nothing found
 
     except vision.exceptions.GoogleCloudError as e:
-        print(f"Vision API Error: {e}")
+        print(f"[ERROR] Vision API Error: {e}")
         return f"OCR Failed: API Error - {e}"
-    except FileNotFoundError:
-        print(f"Error: Image file not found at {image_path}")
+    except FileNotFoundError as e:
+        print(f"[ERROR] {e}")
         return f"OCR Failed: File not found"
     except Exception as e:
-        print(f"Error during text detection or processing: {e}")
-        # Log the full traceback for debugging if needed
-        # import traceback
-        # traceback.print_exc()
+        print(f"[ERROR] Error during text detection or processing: {e}")
+        traceback.print_exc()
         return f"OCR Failed: {e}"
-
 
 # --- Editable Dialog for Plate Correction ---
 class EditableDialog(tk.Toplevel):
