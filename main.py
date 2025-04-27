@@ -862,13 +862,13 @@ class ParkingApp:
                 append_log_func(f"❌ Property '{prop_name}' not found in DB during save.\n")
                 return
 
-            pid = prop['_id']
-
+            pid = prop['property_id']
+ 
             if is_entry:
                 # --- Handle Vehicle Entry ---
                 existing_entry = parking_col.find_one({
                     "vehicle_no": plate,
-                    "property_id": str(pid),
+                    "property_id": pid,
                     "exit_time": None
                 })
                 if existing_entry:
@@ -876,7 +876,7 @@ class ParkingApp:
                     append_log_func(f"⚠️ Duplicate entry attempt for {plate}. Already parked.\n")
                     return
 
-                latest_prop = property_col.find_one({"_id": pid}, {"available_parking_spaces": 1})
+                latest_prop = property_col.find_one({"property_id": pid}, {"available_parking_spaces": 1})
                 if not latest_prop or latest_prop.get('available_parking_spaces', 0) <= 0:
                     messagebox.showwarning("Parking Full", f"No parking slots currently available at {prop_name}.", parent=self.root)
                     append_log_func(f"❌ Parking full at {prop_name}. Entry denied for {plate}.\n")
@@ -884,7 +884,7 @@ class ParkingApp:
 
                 new_record = {
                     "parking_id": str(uuid.uuid4()),
-                    "property_id": str(pid),
+                    "property_id": pid,
                     "vehicle_no": plate,
                     "entry_time": now,
                     "exit_time": None,
@@ -893,7 +893,7 @@ class ParkingApp:
                 }
                 insert_result = parking_col.insert_one(new_record)
                 update_result = property_col.update_one(
-                    {"_id": pid},
+                    {"property_id": pid},
                     {"$inc": {"available_parking_spaces": -1}}
                 )
 
@@ -910,7 +910,7 @@ class ParkingApp:
                     {
                         "vehicle_no": plate,
                         "exit_time": None,
-                        "property_id": str(pid)
+                        "property_id": pid
                     },
                     {"$set": {"exit_time": now}},
                     sort=[('entry_time', -1)],
