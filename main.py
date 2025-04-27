@@ -197,7 +197,9 @@ class EditableDialog(tk.Toplevel):
         # --- Plate Entry ---
         tk.Label(self, text="Detected/Enter Plate:", font=('Segoe UI',12)).pack(pady=(0,5))
         self.entry = tk.Entry(self, font=('Segoe UI',14), justify='center', width=20)
-        self.entry.insert(0, plate if not plate.startswith("OCR Failed") else "") # Pre-fill if valid detection
+        # Use the detected plate unless it's an error message
+        initial_plate = plate if not (plate.startswith("OCR Failed") or not plate) else ""
+        self.entry.insert(0, initial_plate)
         self.entry.pack(pady=(0,10), padx=10)
         self.entry.focus_set() # Set focus to the entry field
         self.entry.selection_range(0, tk.END) # Select existing text
@@ -236,13 +238,14 @@ class EditableDialog(tk.Toplevel):
         if not plate:
             messagebox.showwarning("Input Required","Please enter a number plate.", parent=self)
             return
-       
-        # Allow only alphanumeric characters (can be adjusted)
-        # if not re.fullmatch(r'[A-Z0-9]+', plate):
-        #      messagebox.showwarning("Invalid Format", "Plate should contain only letters (A-Z) and numbers (0-9).", parent=self)
-        #      return
+
+        # Validate plate format (allow letters, numbers, and hyphens from formatted plates)
+        if not re.fullmatch(r'[A-Z0-9\-]+', plate):
+             messagebox.showwarning("Invalid Format", "Plate should contain only letters (A-Z), numbers (0-9), and hyphens (-).", parent=self)
+             return
+
         # Optional: Add length check if desired
-        # if not (4 <= len(plate) <= 10):
+        # if not (6 <= len(plate) <= 13): # Adjust length based on expected formats
         #     messagebox.showwarning("Invalid Length", "Plate length seems incorrect.", parent=self)
         #     return
 
@@ -300,7 +303,11 @@ class ParkingApp:
 
             # If the tab widget has a method to trigger capture, call it
             if hasattr(current_tab_widget, 'trigger_capture') and callable(getattr(current_tab_widget, 'trigger_capture')):
-                current_tab_widget.trigger_capture()
+                # Check if the capture button is enabled before triggering
+                if hasattr(current_tab_widget, '_btn_capture') and current_tab_widget._btn_capture['state'] == tk.NORMAL:
+                    current_tab_widget.trigger_capture()
+                else:
+                    print("Capture button is disabled, Enter key ignored.")
             else:
                 print("Current tab widget does not have 'trigger_capture' method.")
         except tk.TclError:
@@ -319,8 +326,11 @@ class ParkingApp:
              if tab and hasattr(tab, 'stop_camera') and callable(getattr(tab, 'stop_camera')):
                  # Check if the tab is *not* the newly selected one
                  try:
-                     if self.nav.select() != str(tab): # Compare string representations
+                     if self.nav.index(self.nav.select()) != self.nav.index(tab): # Compare indices
                          tab.stop_camera()
+                 except tk.TclError:
+                     # Handle cases where a tab might not be fully realized yet
+                     print(f"TCL error comparing tabs during tab change (likely benign).")
                  except Exception as e:
                      print(f"Error stopping camera on non-active tab change: {e}")
 
@@ -419,7 +429,8 @@ class ParkingApp:
         ttk.Label(prop_frame, text="Property:", width=8).pack(side="left", padx=(0, 5))
         prop_var = tk.StringVar()
         try:
-            props = list(property_col.find({}, {"name": 1})) # Fetch only names initially
+            # Fetch names, sorted alphabetically for better usability
+            props = list(property_col.find({}, {"name": 1}).sort("name", 1))
             names = [p['name'] for p in props if 'name' in p]
         except Exception as e:
             print(f"Error fetching properties: {e}")
@@ -440,6 +451,7 @@ class ParkingApp:
         slots_lbl.grid(row=1, column=0, sticky="w", pady=2, padx=5)
 
         def refresh_slots(*args):
+            """Refreshes the displayed slot count for the selected property."""
             selected_prop_name = prop_var.get()
             if selected_prop_name and selected_prop_name != "No Properties Found":
                 try:
@@ -451,13 +463,16 @@ class ParkingApp:
                         slots_lbl.config(text=f"Slots Available: {avail} / {total}")
                     else:
                         slots_lbl.config(text="Slots: Error (Not Found)")
+                except pymongo.errors.ConnectionFailure:
+                     slots_lbl.config(text="Slots: DB Connection Error")
+                     print(f"DB connection error during slots refresh.")
                 except Exception as e:
-                    slots_lbl.config(text="Slots: DB Error")
+                    slots_lbl.config(text="Slots: Error")
                     print(f"Database error during slots refresh: {e}")
             else:
                 slots_lbl.config(text="Slots: N/A")
 
-        prop_var.trace_add('write', refresh_slots)
+        prop_var.trace_add('write', refresh_slots) # Update slots when property changes
         if property_available: refresh_slots() # Initial call
 
         # --- Camera Selection ---
@@ -493,6 +508,7 @@ class ParkingApp:
                  btn_capture.config(text="🚫 No Camera Found")
 
         btn_capture.grid(row=4, column=0, pady=10)
+        frame._btn_capture = btn_capture # Store reference for Enter key check
 
         # --- Right Side Frame (Logs) ---
         right_frame = ttk.Frame(frame, padding=5)
@@ -509,19 +525,40 @@ class ParkingApp:
         export_btn.pack(side="left")
 
         # --- Log Display ---
-        log = scrolledtext.ScrolledText(right_frame, width=40, height=15,
+        log = scrolledtext.ScrolledText(right_frame, width=45, height=15, # Slightly wider
                                         font=("Consolas", 10), wrap=tk.WORD,
-                                        bg="#ffffff", fg="#333333", relief="solid", borderwidth=1)
+                                        bg="#ffffff", fg="#333333", relief="solid", borderwidth=1,
+                                        state=tk.DISABLED) # Start disabled
         log.grid(row=1, column=0, sticky="nsew")
-        log.insert("end", f"📄 {section} Log History:\n" + "="*25 + "\n")
+
+        # --- Log Utility Function ---
+        def append_log(message):
+            """Appends a message to the log widget, ensuring it's enabled."""
+            try:
+                log.config(state=tk.NORMAL)
+                log.insert(tk.END, message)
+                log.see(tk.END) # Scroll to the end
+                log.config(state=tk.DISABLED)
+            except tk.TclError as e:
+                 print(f"Error appending to log (widget might be destroyed): {e}")
+            except Exception as e:
+                 print(f"Unexpected error appending log: {e}")
+
 
         # Set commands for log control buttons
-        clear_btn.config(command=lambda: log.delete('1.0', 'end')) # Simple clear
+        def clear_log_action():
+            log.config(state=tk.NORMAL)
+            log.delete('1.0', tk.END)
+            # Re-add header after clearing
+            log.insert("end", f"📄 {section} Log History:\n" + "="*25 + "\n")
+            log.config(state=tk.DISABLED)
+        clear_btn.config(command=clear_log_action)
         export_btn.config(command=lambda: self._export(log, section))
 
         # --- Store references and state on the frame widget itself ---
         frame._state = {'cap': None, 'frame': None, 'after_id': None}
-        frame._log = log
+        frame._log_widget = log # Store log widget reference
+        frame._append_log = append_log # Store utility function
         frame._canvas = canvas
         frame._prop_var = prop_var # Store prop_var for refresh_slots access
         frame._refresh_slots = refresh_slots # Store function reference
@@ -531,7 +568,6 @@ class ParkingApp:
             """Updates the video feed on the canvas."""
             cap = frame._state.get('cap') # Use get for safety
             if cap is None or not cap.isOpened():
-                # Ensure loop stops if camera becomes unavailable
                 if frame._state.get('after_id') is not None:
                     frame._canvas.after_cancel(frame._state['after_id'])
                     frame._state['after_id'] = None
@@ -541,44 +577,27 @@ class ParkingApp:
                 ok, frm = cap.read()
                 if ok and frm is not None:
                     frame._state['frame'] = frm # Store the latest raw frame
-
-                    # Convert color space for PIL
                     img_rgb = cv2.cvtColor(frm, cv2.COLOR_BGR2RGB)
                     img_pil = Image.fromarray(img_rgb)
-
-                    # --- Display PhotoImage without resizing to fill canvas ---
-                    # Calculate aspect ratio to fit within the canvas widget dimensions
                     canvas_w = frame._canvas.winfo_width()
                     canvas_h = frame._canvas.winfo_height()
-
-                    # Prevent division by zero if canvas hasn't been drawn yet
                     if canvas_w <= 1 or canvas_h <= 1:
-                         # If canvas size is not determined, use a default or skip update
-                         frame._state['after_id'] = frame._canvas.after(100, update_feed) # Try again later
+                         frame._state['after_id'] = frame._canvas.after(100, update_feed)
                          return
-
                     img_pil.thumbnail((canvas_w, canvas_h), Image.Resampling.LANCZOS)
                     photo = ImageTk.PhotoImage(img_pil)
-
-                    # Update the label's image
-                    frame._canvas.imgtk = photo # Keep reference to prevent garbage collection
-                    frame._canvas.config(image=photo, text="") # Set image, clear any text
+                    frame._canvas.imgtk = photo
+                    frame._canvas.config(image=photo, text="")
                 else:
-                    # Handle case where read fails but camera might still be open
                     print(f"Warning: Frame read failed for camera {cam_var.get()}")
-                    # Optionally display a message on the canvas
-                    # frame._canvas.config(image='', text="Frame Read Error")
-                    # frame._canvas.imgtk = None
 
             except Exception as e:
                 print(f"Error in update_feed for camera {cam_var.get()}: {e}")
-                # Optionally stop camera or display error
                 stop_camera()
                 frame._canvas.config(image='', text=f"Feed Error: {e}")
                 frame._canvas.imgtk = None
-                return # Stop the loop on error
+                return
 
-            # Schedule the next update
             frame._state['after_id'] = frame._canvas.after(40, update_feed) # Approx 25 FPS
 
         def start_camera(event=None):
@@ -586,25 +605,23 @@ class ParkingApp:
             stop_camera() # Ensure previous camera is stopped
 
             selected_cam_index = cam_var.get()
-            if selected_cam_index == -1 or not isinstance(selected_cam_index, int): # Check if a valid index is selected
+            if selected_cam_index == -1 or not isinstance(selected_cam_index, int):
                  frame._canvas.config(text="No Camera Selected/Available", image='')
                  frame._canvas.imgtk = None
                  btn_capture.config(state="disabled", text="🚫 Select Camera")
                  return
 
-            log.insert("end", f"⏳ Initializing camera {selected_cam_index}...\n")
-            log.see("end")
+            append_log(f"⏳ Initializing camera {selected_cam_index}...\n")
             frame._canvas.config(text=f"Starting Camera {selected_cam_index}...", image='')
             frame._canvas.imgtk = None
-            self.root.update_idletasks() # Update UI to show message
+            self.root.update_idletasks()
 
             cap = cv2.VideoCapture(selected_cam_index)
-            time.sleep(0.5) # Give camera time to initialize
+            time.sleep(0.5)
 
             if not cap.isOpened():
                 messagebox.showerror("Camera Error", f"Cannot open camera index {selected_cam_index}", parent=self.root)
-                log.insert("end", f"❌ Failed to open camera {selected_cam_index}\n")
-                log.see("end")
+                append_log(f"❌ Failed to open camera {selected_cam_index}\n")
                 frame._state['cap'] = None
                 frame._canvas.config(text="Failed to Open Camera", image='')
                 frame._canvas.imgtk = None
@@ -612,26 +629,21 @@ class ParkingApp:
                 return
 
             # --- Test Read ---
-            test_frame = None
             read_success = False
             try:
-                # Try reading a few frames to ensure it's working
                 for _ in range(5):
                     ok, test_frame = cap.read()
                     if ok and test_frame is not None:
                         read_success = True
                         break
-                    time.sleep(0.1) # Short delay between attempts
-
+                    time.sleep(0.1)
                 if not read_success:
                     raise IOError("Failed to read initial frames after opening.")
-
             except Exception as e:
                 cap.release()
                 frame._state['cap'] = None
                 messagebox.showerror("Camera Error", f"Error reading initial frames from camera {selected_cam_index}: {e}", parent=self.root)
-                log.insert("end", f"❌ Failed initial read: {e}\n")
-                log.see("end")
+                append_log(f"❌ Failed initial read: {e}\n")
                 frame._canvas.config(text="Camera Read Error", image='')
                 frame._canvas.imgtk = None
                 btn_capture.config(state="disabled", text="🚫 Read Error")
@@ -639,11 +651,9 @@ class ParkingApp:
             # --- End Test Read ---
 
             frame._state['cap'] = cap
-            log.insert("end", f"✅ {section} Camera {selected_cam_index} started successfully.\n")
-            log.see("end")
-            frame._canvas.config(text="") # Clear status text
+            append_log(f"✅ {section} Camera {selected_cam_index} started successfully.\n")
+            frame._canvas.config(text="")
 
-            # Enable capture button only if property is also selected
             if prop_var.get() and prop_var.get() != "No Properties Found":
                 btn_capture.config(state="normal", text="📸 Capture & Process")
             else:
@@ -661,47 +671,43 @@ class ParkingApp:
             if cap and cap.isOpened():
                 cap.release()
                 frame._state['cap'] = None
-                log.insert("end", f"🛑 {section} Camera stopped.\n")
-                log.see("end")
+                # Only log stop if it was actually running
+                # append_log(f"🛑 {section} Camera stopped.\n")
 
-            # Clear canvas and disable button
             frame._canvas.config(image='', text="Camera Stopped")
-            frame._canvas.imgtk = None # Clear reference
-            # Keep button disabled unless explicitly started again
-            if btn_capture['state'] != 'disabled':
+            frame._canvas.imgtk = None
+            if btn_capture['state'] == tk.NORMAL:
                  btn_capture.config(state="disabled", text="🚫 Camera Stopped")
 
         # --- Define and Attach Capture Trigger ---
         def trigger_capture_local():
+             # Use the stored append_log function for the specific tab
              self._capture_and_edit(
-                 frame, # Pass the specific tab frame
+                 frame,
                  is_entry,
-                 log,
+                 frame._append_log, # Pass the tab-specific log function
                  prop_var.get(),
-                 refresh_slots, # Pass the refresh function
-                 btn_capture # Pass the button itself
+                 refresh_slots,
+                 btn_capture
              )
-        frame.trigger_capture = trigger_capture_local # Attach to frame for global access
-        btn_capture.config(command=trigger_capture_local) # Set button command
+        frame.trigger_capture = trigger_capture_local
+        btn_capture.config(command=trigger_capture_local)
 
-        # Attach start/stop methods to the frame for external control (e.g., tab change)
         frame.start_camera = start_camera
         frame.stop_camera = stop_camera
-
-        # Bind camera selection change to restart the camera
         cbcam.bind("<<ComboboxSelected>>", start_camera)
 
-        # Load initial logs for this tab
-        self._load_logs(log, is_entry)
+        # Load initial logs for this tab using the append_log utility
+        self._load_logs(frame._log_widget, frame._append_log, is_entry)
 
 
-    def _capture_and_edit(self, tab_frame, is_entry, log, prop_name, refresh_slots, btn):
+    def _capture_and_edit(self, tab_frame, is_entry, append_log_func, prop_name, refresh_slots, btn):
         """Captures frame, detects text, shows edit dialog, and saves on confirm."""
+        # Use the passed append_log_func for logging within this specific tab
         if not prop_name or prop_name == "No Properties Found":
             messagebox.showwarning("Property Required", "Please select a property before capturing.", parent=self.root)
             return
 
-        # Disable button during processing
         original_btn_text = btn['text']
         btn.config(state="disabled", text="⏳ Capturing...")
         self.root.update_idletasks()
@@ -709,19 +715,13 @@ class ParkingApp:
         cap = tab_frame._state.get('cap')
         if cap is None or not cap.isOpened():
             messagebox.showwarning("No Camera", "Camera is not available or not running.", parent=self.root)
-            btn.config(state="normal", text=original_btn_text) # Re-enable with original text
-            # Try restarting camera if possible
+            btn.config(state="normal", text=original_btn_text)
             if hasattr(tab_frame, 'start_camera'): tab_frame.start_camera()
             return
 
-        log.insert("end", "📸 Capturing current frame...\n")
-        log.see("end")
+        append_log_func("📸 Capturing current frame...\n")
 
-        # --- Capture Frame ---
-        # Use the frame already stored in the state by update_feed for less delay
         captured_frame = tab_frame._state.get('frame')
-
-        # Fallback: If no frame in state, try one last read
         if captured_frame is None:
             print("No frame in state, attempting final read...")
             try:
@@ -730,229 +730,176 @@ class ParkingApp:
                      raise IOError("Final frame read failed.")
             except Exception as e:
                  messagebox.showerror("Capture Error", f"Failed to capture frame: {e}", parent=self.root)
-                 log.insert("end", f"❌ Capture error: {e}\n")
-                 log.see("end")
+                 append_log_func(f"❌ Capture error: {e}\n")
                  btn.config(state="normal", text=original_btn_text)
                  return
-        # --- End Capture Frame ---
 
-        # --- Save Frame Temporarily ---
-        path = None # Initialize path
+        path = None
         try:
             os.makedirs(ASSETS_DIR, exist_ok=True)
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f") # Add microseconds
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             filename = f"capture_{timestamp}_{uuid.uuid4().hex[:6]}.jpg"
             path = os.path.join(ASSETS_DIR, filename)
-
-            # Use high quality JPEG saving
             success = cv2.imwrite(path, captured_frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
             if not success:
                 raise IOError(f"cv2.imwrite failed to save to {path}")
 
-            log.insert("end", f"💾 Frame saved: {filename}\n")
-            log.see("end")
+            append_log_func(f"💾 Frame saved: {filename}\n")
             btn.config(text="⏳ Detecting...")
             self.root.update_idletasks()
 
         except Exception as e:
             messagebox.showerror("File Save Error", f"Could not save captured image: {e}", parent=self.root)
-            log.insert("end", f"❌ Image save error: {e}\n")
-            log.see("end")
+            append_log_func(f"❌ Image save error: {e}\n")
             btn.config(state="normal", text=original_btn_text)
             return
-        # --- End Save Frame ---
 
-        # --- Detect Text ---
-        plate = detect_text(path) # Call OCR function
-        log.insert("end", f"🔍 OCR Result: '{plate}'\n" if plate else "🔍 OCR Result: No plate detected\n")
-        log.see("end")
-        # --- End Detect Text ---
+        plate = detect_text(path)
+        append_log_func(f"🔍 OCR Result: '{plate}'\n" if plate else "🔍 OCR Result: No plate detected\n")
 
-        # --- Define Callbacks for Dialog ---
         def on_confirm_dialog(edited_plate):
-            """Callback when user confirms in the dialog."""
-            log.insert("end", f"✅ Confirmed Plate: {edited_plate}\n")
-            log.see("end")
-            # Proceed to save the record
-            self._save_record(edited_plate, is_entry, log, prop_name, refresh_slots)
-            # Button is re-enabled by the dialog's <Destroy> binding
+            append_log_func(f"✅ Confirmed Plate: {edited_plate}\n")
+            # Pass the correct append_log_func to _save_record
+            self._save_record(edited_plate, is_entry, append_log_func, prop_name, refresh_slots)
 
         def on_retake_dialog():
-            """Callback when user requests retake from the dialog."""
-            log.insert("end", "🔄 Retake requested by user.\n")
-            log.see("end")
-            # Button is re-enabled by the dialog's <Destroy> binding
+            append_log_func("🔄 Retake requested by user.\n")
 
-        # --- Show Editable Dialog ---
         try:
             dialog = EditableDialog(self.root, path, plate, on_confirm_dialog, on_retake_dialog)
-            # --- IMPORTANT: Re-enable button when dialog is destroyed ---
-            # Use add='+' to ensure this binding doesn't overwrite the dialog's internal one
             dialog.bind("<Destroy>", lambda e: btn.config(state="normal", text=original_btn_text), add="+")
-            self.root.wait_window(dialog) # Wait for the dialog to close
+            self.root.wait_window(dialog)
 
         except Exception as e:
              messagebox.showerror("Dialog Error", f"Failed to open edit dialog: {e}", parent=self.root)
-             log.insert("end", f"❌ Dialog error: {e}\n")
-             log.see("end")
-             btn.config(state="normal", text=original_btn_text) # Re-enable button on error
-             # Clean up temp file if dialog failed to open
+             append_log_func(f"❌ Dialog error: {e}\n")
+             btn.config(state="normal", text=original_btn_text)
              if path and os.path.exists(path):
                  try: os.remove(path)
                  except Exception as del_e: print(f"Error cleaning up {path}: {del_e}")
 
 
-    # <<< --- THIS IS THE UPDATED _save_record METHOD --- >>>
-    def _save_record(self, plate, is_entry, log, prop_name, refresh_slots_func):
+    # <<< --- METHOD SIGNATURE UPDATED TO ACCEPT append_log_func --- >>>
+    def _save_record(self, plate, is_entry, append_log_func, prop_name, refresh_slots_func):
         """Saves or updates parking record in the database with HOURLY fee logic."""
         now = datetime.now()
-        log.insert("end", f"💾 Attempting to save {'entry' if is_entry else 'exit'} for {plate}...\n")
-        log.see("end")
+        # Use the passed append_log_func for logging
+        append_log_func(f"💾 Attempting to save {'entry' if is_entry else 'exit'} for {plate}...\n")
 
-        # Validate plate format again before saving (optional but good practice)
-        if not re.fullmatch(r'[A-Z0-9\-]+', plate): # Allow hyphens from formatted plates
+        # Validate plate format again before saving
+        if not re.fullmatch(r'[A-Z0-9\-]+', plate):
              messagebox.showerror("Save Error", f"Invalid plate format '{plate}' provided for saving.", parent=self.root)
-             log.insert("end", f"❌ Save aborted: Invalid plate format '{plate}'.\n")
-             log.see("end")
+             append_log_func(f"❌ Save aborted: Invalid plate format '{plate}'.\n")
              return
 
         try:
-            # Find the property details using the provided name
             prop = property_col.find_one({"name": prop_name})
             if not prop:
                 messagebox.showerror("Property Error", f"Property '{prop_name}' not found in the database. Cannot save record.", parent=self.root)
-                log.insert("end", f"❌ Property '{prop_name}' not found in DB during save.\n")
-                log.see("end")
+                append_log_func(f"❌ Property '{prop_name}' not found in DB during save.\n")
                 return
 
-            pid = prop['_id'] # Get the property's MongoDB ObjectId
+            pid = prop['_id']
 
             if is_entry:
                 # --- Handle Vehicle Entry ---
-
-                # 1. Check for existing open entry for this vehicle at this property
                 existing_entry = parking_col.find_one({
                     "vehicle_no": plate,
-                    "property_id": str(pid), # Store property_id as string for consistency? Or keep as ObjectId? Let's use str(pid) for now.
-                    "exit_time": None        # Crucial condition: only find records without an exit time
+                    "property_id": str(pid),
+                    "exit_time": None
                 })
                 if existing_entry:
                     messagebox.showwarning("Duplicate Entry", f"Vehicle {plate} already has an active parking session at {prop_name}.", parent=self.root)
-                    log.insert("end", f"⚠️ Duplicate entry attempt for {plate}. Already parked.\n")
-                    log.see("end")
+                    append_log_func(f"⚠️ Duplicate entry attempt for {plate}. Already parked.\n")
                     return
 
-                # 2. Check for available parking spaces (re-fetch latest count)
                 latest_prop = property_col.find_one({"_id": pid}, {"available_parking_spaces": 1})
                 if not latest_prop or latest_prop.get('available_parking_spaces', 0) <= 0:
                     messagebox.showwarning("Parking Full", f"No parking slots currently available at {prop_name}.", parent=self.root)
-                    log.insert("end", f"❌ Parking full at {prop_name}. Entry denied for {plate}.\n")
-                    log.see("end")
+                    append_log_func(f"❌ Parking full at {prop_name}. Entry denied for {plate}.\n")
                     return
 
-                # 3. Create and insert the new parking record
                 new_record = {
-                    "parking_id": str(uuid.uuid4()), # Unique ID for this parking event
-                    "property_id": str(pid),         # Link to the property
+                    "parking_id": str(uuid.uuid4()),
+                    "property_id": str(pid),
                     "vehicle_no": plate,
-                    "entry_time": now,               # Record current time as entry time
-                    "exit_time": None,               # Null exit time signifies active session
-                    "fee": 0,                        # Initial fee is zero
-                    "mode_of_payment": None          # Payment mode set on exit/payment
-                    # Add other relevant fields if needed (e.g., entry_gate_id)
+                    "entry_time": now,
+                    "exit_time": None,
+                    "fee": 0,
+                    "mode_of_payment": None
                 }
                 insert_result = parking_col.insert_one(new_record)
-
-                # 4. Decrement available parking spaces for the property
                 update_result = property_col.update_one(
                     {"_id": pid},
                     {"$inc": {"available_parking_spaces": -1}}
                 )
 
-                # 5. Log success and show confirmation
                 if insert_result.inserted_id and update_result.modified_count > 0:
-                    log.insert("end", f"🟢 Entry recorded: {plate} @ {now:%Y-%m-%d %H:%M:%S}\n")
+                    append_log_func(f"🟢 Entry recorded: {plate} @ {now:%Y-%m-%d %H:%M:%S}\n")
                     messagebox.showinfo("Entry Success", f"Vehicle {plate} entry recorded successfully at {prop_name}.", parent=self.root)
                 else:
-                     log.insert("end", f"⚠️ Entry DB update issue for {plate}. Check DB consistency.\n")
+                     append_log_func(f"⚠️ Entry DB update issue for {plate}. Check DB consistency.\n")
                      messagebox.showwarning("DB Warning", "Entry recorded, but slot count update might have failed.", parent=self.root)
-
 
             else: # is_exit
                 # --- Handle Vehicle Exit ---
-
-                # 1. Find the latest open entry for this vehicle at this property
-                #    Update its exit_time and return the updated document
                 updated_doc = parking_col.find_one_and_update(
                     {
                         "vehicle_no": plate,
-                        "exit_time": None,       # Find the active session
+                        "exit_time": None,
                         "property_id": str(pid)
                     },
-                    {
-                        "$set": {"exit_time": now} # Set the current time as exit time
-                    },
-                    sort=[('entry_time', -1)], # Get the latest entry if duplicates somehow exist
-                    return_document=pymongo.ReturnDocument.AFTER # Return the document *after* the update
+                    {"$set": {"exit_time": now}},
+                    sort=[('entry_time', -1)],
+                    return_document=pymongo.ReturnDocument.AFTER
                 )
 
                 if updated_doc:
                     entry_time = updated_doc.get('entry_time')
-                    calculated_fee = 0 # Initialize fee
+                    calculated_fee = 0.0 # Use float for fees
 
-                    # 2. Calculate Fee based on duration (if entry_time is valid)
                     if entry_time and isinstance(entry_time, datetime):
                         duration = now - entry_time
-                        total_hours = duration.total_seconds() / 3600 # Duration in hours
+                        total_hours = duration.total_seconds() / 3600
 
-                        # Get the hourly fee from the property document
-                        # IMPORTANT: Ensure 'fee_per_hour' field exists in your property collection!
-                        fee_per_hour = prop.get('fee_per_hour', 10.0) # Default to 10.0 if not found
+                        fee_per_hour = prop.get('fee_per_hour', 10.0)
                         if not isinstance(fee_per_hour, (int, float)) or fee_per_hour < 0:
                              print(f"Warning: Invalid fee_per_hour ({fee_per_hour}) for property {prop_name}. Using default 10.0.")
-                             fee_per_hour = 10.0 # Fallback to default if invalid type/value
+                             fee_per_hour = 10.0
 
                         if total_hours <= 1.0:
-                            # First hour is free
                             calculated_fee = 0.0
                         else:
-                            # Calculate chargeable hours: round total hours UP, then subtract the 1 free hour
                             chargeable_hours = math.ceil(total_hours) - 1
                             calculated_fee = chargeable_hours * fee_per_hour
 
-                        # Ensure fee is non-negative and format as float
                         calculated_fee = round(max(0.0, calculated_fee), 2)
 
-                        # 3. Update the fee in the parking record
                         parking_col.update_one(
                             {"_id": updated_doc["_id"]},
                             {"$set": {"fee": calculated_fee}}
-                            # Optionally update payment mode here if known:
-                            # "$set": {"fee": calculated_fee, "mode_of_payment": "Cash"}
                         )
-                        log.insert("end", f"💲 Fee calculated: ₹{calculated_fee:.2f} for {total_hours:.2f} hours.\n")
+                        append_log_func(f"💲 Fee calculated: ₹{calculated_fee:.2f} for {total_hours:.2f} hours.\n")
                     else:
-                         log.insert("end", f"⚠️ Could not calculate fee for {plate}: Invalid entry time found.\n")
+                         append_log_func(f"⚠️ Could not calculate fee for {plate}: Invalid entry time found.\n")
                          messagebox.showwarning("Fee Warning", "Could not calculate fee due to missing entry time.", parent=self.root)
 
-
-                    # 4. Increment available parking spaces
                     property_col.update_one(
                         {"_id": pid},
                         {"$inc": {"available_parking_spaces": 1}}
                     )
 
-                    # 5. Log success and show confirmation with fee
-                    log.insert("end", f"🔴 Exit recorded: {plate} @ {now:%Y-%m-%d %H:%M:%S} (Fee: ₹{calculated_fee:.2f})\n")
+                    # --- CURRENCY SYMBOL CORRECTED HERE ---
+                    log_msg = f"🔴 Exit recorded: {plate} @ {now:%Y-%m-%d %H:%M:%S} (Fee: ₹{calculated_fee:.2f})\n"
+                    append_log_func(log_msg)
                     messagebox.showinfo("Exit Success", f"Exit recorded for {plate}.\nCalculated Fee: ₹{calculated_fee:.2f}", parent=self.root)
+                    # --- END CORRECTION ---
 
                 else:
-                    # No open entry was found for this vehicle at this property
                     messagebox.showwarning("No Entry Found", f"No active parking session found for vehicle {plate} at {prop_name}.", parent=self.root)
-                    log.insert("end", f"❌ Exit attempt failed: No open entry found for {plate} at {prop_name}.\n")
+                    append_log_func(f"❌ Exit attempt failed: No open entry found for {plate} at {prop_name}.\n")
 
-            # Always refresh slots and scroll log after entry or exit attempt
-            log.see("end")
+            # Always refresh slots after entry or exit attempt
             if callable(refresh_slots_func):
                 refresh_slots_func()
             else:
@@ -961,18 +908,15 @@ class ParkingApp:
 
         except pymongo.errors.ConnectionFailure as e:
              messagebox.showerror("Database Error", f"Database connection lost: {e}", parent=self.root)
-             log.insert("end", f"❌ DB Connection Failure: {e}\n")
+             append_log_func(f"❌ DB Connection Failure: {e}\n")
         except pymongo.errors.PyMongoError as e:
              messagebox.showerror("Database Error", f"A database error occurred: {e}", parent=self.root)
-             log.insert("end", f"❌ DB Error during save: {e}\n")
+             append_log_func(f"❌ DB Error during save: {e}\n")
         except Exception as e:
-            # Catch any other unexpected errors
             messagebox.showerror("Unexpected Error", f"An unexpected error occurred while saving: {e}", parent=self.root)
-            log.insert("end", f"❌ Unexpected Save Error: {e}\n")
-            # import traceback # Optional detailed logging for debugging
-            # traceback.print_exc()
+            append_log_func(f"❌ Unexpected Save Error: {e}\n")
+            # import traceback; traceback.print_exc() # For debugging
         finally:
-            log.see("end")
             # Ensure slots are refreshed even if there was an error during DB interaction
             if callable(refresh_slots_func):
                 try:
@@ -983,56 +927,61 @@ class ParkingApp:
     # <<< --- END OF UPDATED _save_record METHOD --- >>>
 
 
-    def _load_logs(self, log_widget, is_entry):
+    # <<< --- METHOD SIGNATURE UPDATED TO ACCEPT append_log_func --- >>>
+    def _load_logs(self, log_widget, append_log_func, is_entry):
         """Loads recent parking records into the specified log display."""
-        log_widget.config(state=tk.NORMAL) # Enable writing
-        log_widget.delete('1.0', 'end') # Clear previous content
+        # Use the passed append_log_func for logging status during load
         section = "Entry" if is_entry else "Exit"
+        # Clear existing content using the utility function (which handles state)
+        log_widget.config(state=tk.NORMAL)
+        log_widget.delete('1.0', tk.END)
         log_widget.insert("end", f"📄 {section} Log History:\n" + "="*25 + "\n")
+        log_widget.config(state=tk.DISABLED)
+
 
         try:
-            # Define query based on entry/exit tab
             query = {"exit_time": None} if is_entry else {"exit_time": {"$ne": None}}
-            # Define sort key based on entry/exit tab
             sort_key = "entry_time" if is_entry else "exit_time"
-
-            # Fetch recent records from MongoDB, limit to e.g., 20
             recent_records = parking_col.find(query).sort(sort_key, pymongo.DESCENDING).limit(20)
 
-            count = 0
-            records_list = list(recent_records) # Convert cursor to list to check count easily
+            records_list = list(recent_records)
             if not records_list:
-                 log_widget.insert("end", f"No recent {section.lower()} records found.\n")
+                 append_log_func(f"No recent {section.lower()} records found.\n")
             else:
+                log_lines = [] # Collect lines before inserting
                 for record in records_list:
                     ts_key = "entry_time" if is_entry else "exit_time"
                     ts = record.get(ts_key)
                     if ts and isinstance(ts, datetime):
                         icon = "🟢" if is_entry else "🔴"
                         plate = record.get('vehicle_no', 'N/A')
-                        time_str = ts.strftime('%Y-%m-%d %H:%M:%S') # Consistent time format
-                        log_line = f"{icon} {plate:<15} @ {time_str}" # Pad plate for alignment
+                        time_str = ts.strftime('%Y-%m-%d %H:%M:%S')
+                        log_line = f"{icon} {plate:<15} @ {time_str}"
 
-                        # Add fee info for exit logs
                         if not is_entry:
                             fee = record.get('fee', None)
+                            # --- CURRENCY SYMBOL CORRECTED HERE ---
                             fee_str = f"₹{fee:.2f}" if isinstance(fee, (int, float)) else "N/A"
                             log_line += f" (Fee: {fee_str})"
+                            # --- END CORRECTION ---
 
-                        log_widget.insert("end", f"{log_line}\n")
-                        count += 1
+                        log_lines.append(log_line + "\n")
                     else:
                          print(f"Skipping record due to missing/invalid timestamp: {record.get('_id')}")
 
-            log_widget.see("end") # Scroll to the end
+                # Append all collected lines at once
+                if log_lines:
+                     log_widget.config(state=tk.NORMAL)
+                     log_widget.insert(tk.END, "".join(log_lines))
+                     log_widget.see(tk.END)
+                     log_widget.config(state=tk.DISABLED)
+
 
         except pymongo.errors.ConnectionFailure as e:
-             log_widget.insert("end", f"\n❌ DB Connection Error loading logs: {e}\n")
+             append_log_func(f"\n❌ DB Connection Error loading logs: {e}\n")
         except Exception as e:
-            log_widget.insert("end", f"\n❌ Error loading logs: {e}\n")
-            # import traceback; traceback.print_exc() # For debugging
-        finally:
-             log_widget.config(state=tk.DISABLED) # Disable writing after loading
+            append_log_func(f"\n❌ Error loading logs: {e}\n")
+            # import traceback; traceback.print_exc()
 
 
     def _export(self, log_widget, section):
@@ -1041,14 +990,12 @@ class ParkingApp:
         log_content = log_widget.get("1.0", "end").strip()
         log_widget.config(state=tk.DISABLED) # Disable again
 
-        # Extract relevant lines (skip header)
         lines = [line for line in log_content.splitlines() if line.strip() and (line.startswith("🟢") or line.startswith("🔴"))]
 
         if not lines:
             messagebox.showinfo("Export Info", "No log entries found to export.", parent=self.root)
             return
 
-        # Ask for save file path
         default_filename = f"{section.lower()}_logs_{datetime.now():%Y%m%d_%H%M}.csv"
         path = filedialog.asksaveasfilename(
             defaultextension=".csv",
@@ -1057,24 +1004,20 @@ class ParkingApp:
             initialfile=default_filename,
             parent=self.root
         )
-        if not path: # User cancelled
+        if not path:
             return
 
         try:
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                # Write header
                 header = ["Action", "Plate", "Timestamp"]
                 if section == "Exit":
-                    header.append("Fee (₹)")
+                    header.append("Fee (₹)") # Corrected header
                 writer.writerow(header)
 
-                # Process each log line
                 for line in lines:
-                    # Regex to parse the structured log line
-                    # Example: 🟢 MH12AB1234      @ 2023-10-27 10:30:00
-                    # Example: 🔴 KA05XY9876      @ 2023-10-27 11:45:15 (Fee: ₹20.00)
-                    pattern = r'([🟢🔴])\s+([A-Z0-9\-]+)\s+@\s+([\d\-]+\s+[\d:]+)(?:\s+\(Fee:\s*₹?([\d\.]+)\))?'
+                    # Updated Regex to correctly capture ₹ symbol and fee
+                    pattern = r'([🟢🔴])\s+([A-Z0-9\-]+)\s+@\s+([\d\-]+\s+[\d:]+)(?:\s+\(Fee:\s*₹([\d\.]+)\))?'
                     match = re.match(pattern, line.strip())
 
                     if match:
@@ -1082,10 +1025,10 @@ class ParkingApp:
                         action = "Entry" if icon == "🟢" else "Exit"
                         row_data = [action, plate.strip(), timestamp.strip()]
                         if section == "Exit":
-                            row_data.append(fee.strip() if fee else "") # Add fee if present
+                            row_data.append(fee.strip() if fee else "")
                         writer.writerow(row_data)
                     else:
-                        print(f"Skipping malformed log line during export: {line}") # Log skipped lines
+                        print(f"Skipping malformed log line during export: {line}")
 
             messagebox.showinfo("Export Success", f"Logs successfully exported to:\n{path}", parent=self.root)
 
@@ -1098,7 +1041,7 @@ class ParkingApp:
 if __name__ == "__main__":
     if db is None or client is None:
          print("Exiting: Database connection not established.")
-         sys.exit(1) # Exit if DB connection failed earlier
+         sys.exit(1)
 
     root = tk.Tk()
     app = ParkingApp(root)
@@ -1106,7 +1049,6 @@ if __name__ == "__main__":
     def on_closing():
         """Gracefully handle application closing."""
         print("Closing application...")
-        # Stop cameras on both tabs
         for tab in (app.entry_tab, app.exit_tab):
             if tab and hasattr(tab, 'stop_camera') and callable(getattr(tab, 'stop_camera')):
                 try:
@@ -1115,7 +1057,6 @@ if __name__ == "__main__":
                 except Exception as e:
                     print(f"Error stopping camera during shutdown for {tab}: {e}")
 
-        # Close MongoDB connection
         global client
         if client:
             try:
@@ -1123,13 +1064,10 @@ if __name__ == "__main__":
                 print("MongoDB connection closed.")
             except Exception as e:
                 print(f"Error closing MongoDB connection: {e}")
-            client = None # Ensure client is None after closing
+            client = None
 
-        # Destroy the Tkinter window
         root.destroy()
         print("Application closed.")
 
-    # Set the close protocol
     root.protocol("WM_DELETE_WINDOW", on_closing)
-    # Start the Tkinter event loop
     root.mainloop()
