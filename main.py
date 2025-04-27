@@ -81,7 +81,7 @@ CAMERA_INDEXES = find_cameras(5)
 
 # --- Google Cloud Vision OCR ---
 def detect_text(image_path):
-    """Detects text (potential number plate) in an image."""
+    """Detects text (potential number plate) in an image, handling standard Indian and BH series formats."""
     v_client = vision.ImageAnnotatorClient()
     try:
         with io.open(image_path, 'rb') as f:
@@ -94,28 +94,52 @@ def detect_text(image_path):
             print("Vision API found no text.")
             return ""
 
-        raw = texts[0].description.upper()
-        cleaned_raw = re.sub(r'[^A-Z0-9\s-]', '', raw)
-        compact_raw = cleaned_raw.replace(" ", "").replace("-", "")
+        # --- Text Processing ---
+        raw = texts[0].description.upper() # Convert to uppercase immediately
+        # Keep only A-Z, 0-9. Remove spaces, hyphens, and other symbols early.
+        compact_raw = re.sub(r'[^A-Z0-9]', '', raw)
 
         print(f"Raw detected text: '{raw}'")
         print(f"Cleaned compact text: '{compact_raw}'")
 
-        match = re.search(r'([A-Z]{2})(\d{1,2})([A-Z]{0,2})(\d{3,4})', compact_raw)
+        # --- Regex Matching ---
 
-        if match:
-             state, rto, letters, nums = match.groups()
-             rto = rto.rjust(2, '0')
-             nums = nums.rjust(4, '0')
-             formatted_plate = f"{state}-{rto}-{letters or 'X'}-{nums}"
-             print(f"Formatted plate (regex match): {formatted_plate}")
-             return formatted_plate
-        else:
-             print("Structured regex failed. Returning cleaned compact text.")
-             return compact_raw
+        # 1. Check for BH Series Format (e.g., 25BH4567AB)
+        # Format: YY BH NNNN LL (Year, BH marker, 4 digits, 1 or 2 letters)
+        bh_match = re.search(r'(\d{2})(BH)(\d{4})([A-Z]{1,2})', compact_raw)
+        if bh_match:
+            year, bh_marker, nums, letters = bh_match.groups()
+            # Optional: Add hyphens for readability, although BH plates don't typically have them spaced this way
+            formatted_plate = f"{year}-{bh_marker}-{nums}-{letters}"
+            print(f"Formatted plate (BH series regex match): {formatted_plate}")
+            # Return the compact version found if you prefer the raw format, or the hyphenated one
+            # return compact_raw[bh_match.start():bh_match.end()] # Return exact matched part
+            return formatted_plate # Return hyphenated version
+
+        # 2. Check for Standard Indian Format (e.g., KA01AB1234 or MH05X9876)
+        # Format: SS RR LL NNNN (State Code, RTO Code, Optional Letters, Numbers)
+        # Adjusted regex slightly to be more robust after cleaning
+        standard_match = re.search(r'([A-Z]{2})(\d{1,2})([A-Z]{1,2})?(\d{3,4})', compact_raw)
+                                    #  State    RTO       Letters?    Numbers
+        if standard_match:
+            state, rto, letters, nums = standard_match.groups()
+
+            # Perform formatting and padding
+            rto_padded = rto.rjust(2, '0')
+            nums_padded = nums.rjust(4, '0')
+            # Handle cases where letters might be missing or optional in the standard format
+            letters_formatted = letters if letters else 'X' # Use 'X' or 'XX' if letters are expected but missing, or adjust as needed
+
+            formatted_plate = f"{state}-{rto_padded}-{letters_formatted}-{nums_padded}"
+            print(f"Formatted plate (Standard regex match): {formatted_plate}")
+            return formatted_plate
+
+        # 3. Fallback
+        print("No structured regex (BH or Standard) matched. Returning cleaned compact text.")
+        return compact_raw
 
     except Exception as e:
-        print(f"Error during text detection API call: {e}")
+        print(f"Error during text detection API call or processing: {e}")
         return f"OCR Failed: {e}"
 
 # --- Editable Dialog for Plate Correction ---
