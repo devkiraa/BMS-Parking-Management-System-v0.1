@@ -731,7 +731,7 @@ class ParkingApp:
                     time_str = ts.strftime('%Y-%m-%d %H:%M:%S')
                     log_line = f"{icon} {plate} @ {time_str}"
                     if not is_entry and 'fee' in d:
-                         log_line += f" (Fee: ${d.get('fee', 0.0):.2f})"
+                         log_line += f" (Fee: ₹{d.get('fee', 0.0):.2f})"
                     log.insert("end", f"{log_line}\n")
                     count += 1
 
