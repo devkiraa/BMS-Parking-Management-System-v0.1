@@ -1,0 +1,11 @@
+{
+  "_id": ObjectId("..."),
+  "name": "Main Lot",
+  "parking_spaces_car": 50,
+  "parking_spaces_bike": 100,
+  "available_parking_spaces_car": 45,
+  "available_parking_spaces_bike": 90,
+  "fee_per_hour_car": 20.0,
+  "fee_per_hour_bike": 10.0
+  // other fields...
+}
