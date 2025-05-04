@@ -30,6 +30,14 @@ except Exception as e:
      # Optionally exit, or allow running without OCR
      # sys.exit(1)
 
+# Make sure bcrypt is installed
+try:
+    import bcrypt
+except ImportError:
+    root_check = tk.Tk(); root_check.withdraw()
+    messagebox.showerror("Missing Library", "bcrypt library not found.\nPlease install it: pip install bcrypt", parent=None)
+    root_check.destroy()
+    sys.exit(1)
 
 import sys
 import pymongo
@@ -48,7 +56,9 @@ if not os.path.exists(CONFIG_FILE):
         'mongodb_uri': 'mongodb+srv://apms4bb:memoriesbringback@caspianbms.erpwt.mongodb.net/caspiandb?retryWrites=true&w=majority&appName=Caspianbms', # User MUST replace this
         'database_name': 'caspiandb',
         'parking_collection': 'parking',
-        'property_collection': 'property'
+        'property_collection': 'property',
+        'user_collection': 'user',          # Added user collection
+        'employee_collection': 'employee'   # Added employee collection
     }
     config['Paths'] = {
         'assets_dir': 'assets',
@@ -69,7 +79,14 @@ else:
     try:
         config.read(CONFIG_FILE)
         if not config.has_section('Database') or not config.has_section('Paths'): raise ValueError("Missing sections [Database] or [Paths].")
-        if not config.has_option('Database', 'mongodb_uri') or not config.has_option('Paths', 'service_account_json'): raise ValueError("Missing options mongodb_uri or service_account_json.")
+        # Check for essential options
+        required_db_options = ['mongodb_uri', 'database_name', 'parking_collection', 'property_collection', 'user_collection', 'employee_collection']
+        required_path_options = ['service_account_json', 'assets_dir']
+        for option in required_db_options:
+            if not config.has_option('Database', option): raise ValueError(f"Missing database option: {option}")
+        for option in required_path_options:
+             if not config.has_option('Paths', option): raise ValueError(f"Missing path option: {option}")
+
         # Check if the placeholder URI is still present
         if config.get('Database', 'mongodb_uri') == 'YOUR_MONGODB_SRV_URI_HERE': # Check against the placeholder
             root_check = tk.Tk(); root_check.withdraw()
@@ -87,6 +104,8 @@ try:
     DB_NAME = config.get('Database', 'database_name', fallback='caspiandb')
     PARKING_COL_NAME = config.get('Database', 'parking_collection', fallback='parking')
     PROPERTY_COL_NAME = config.get('Database', 'property_collection', fallback='property')
+    USER_COL_NAME = config.get('Database', 'user_collection', fallback='user')             # Read user collection name
+    EMPLOYEE_COL_NAME = config.get('Database', 'employee_collection', fallback='employee') # Read employee collection name
 except configparser.NoOptionError as e:
     root_check = tk.Tk(); root_check.withdraw(); messagebox.showerror("Config Error", f"Missing required option in '{CONFIG_FILE}': {e}", parent=None); root_check.destroy(); sys.exit(1)
 except Exception as e:
@@ -99,7 +118,7 @@ if not os.path.exists(SERVICE_ACCOUNT_PATH):
 os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = SERVICE_ACCOUNT_PATH
 
 # MongoDB Connection
-client = None; db = None; parking_col = None; property_col = None
+client = None; db = None; parking_col = None; property_col = None; user_col = None; employee_col = None
 try:
     print(f"Connecting to MongoDB...");
     # Added timeout and ping for better connection validation
@@ -108,7 +127,9 @@ try:
     db = client[DB_NAME];
     parking_col = db[PARKING_COL_NAME];
     property_col = db[PROPERTY_COL_NAME]
-    print(f"MongoDB connection successful to database '{DB_NAME}'.")
+    user_col = db[USER_COL_NAME]             # Initialize user collection
+    employee_col = db[EMPLOYEE_COL_NAME]     # Initialize employee collection
+    print(f"MongoDB connection successful to database '{DB_NAME}'. Collections initialized.")
 except pymongo.errors.ConfigurationError as e:
     root_check = tk.Tk(); root_check.withdraw(); messagebox.showerror("Database Config Error", f"MongoDB Configuration Error (check URI in config.ini):\n{e}", parent=None); root_check.destroy(); sys.exit(1)
 except pymongo.errors.ConnectionFailure as e:
@@ -420,8 +441,8 @@ class EditableDialog(tk.Toplevel):
 class ParkingApp:
     def __init__(self, root):
         self.root = root
-        root.title("🚗 Parking Management System")
-        root.minsize(1100, 700); root.geometry("1200x750")
+        root.title("🚗 Parking Management System - Login") # Initial title
+        root.geometry("400x300") # Start with smaller login window size
         root.configure(bg="#f0f0f0") # Base background color
 
         self._make_styles() # Apply custom ttk styles
@@ -429,8 +450,150 @@ class ParkingApp:
         # Store camera mapping: Name -> Index for easy lookup
         self.camera_name_to_index = {name: index for index, name in AVAILABLE_CAMERAS}
 
+        # --- App State ---
+        self.logged_in_user_role = None
+        self.assigned_property_id_str = None # Store the string property_id (e.g., "p2")
+        self.assigned_property_doc = None    # Store the full property document
+
+        # --- Frames ---
+        # Frame for the login widgets
+        self.login_frame = ttk.Frame(root, padding="30 30 30 30")
+        self.login_frame.pack(expand=True) # Pack initially
+
+        # Frame for the main application (will be packed after login)
+        self.main_app_frame = ttk.Frame(root)
+        # Don't pack main_app_frame yet
+
+        # --- Login UI Elements ---
+        self._build_login_ui()
+
+        # Bind Enter key press in password field to attempt login
+        self.password_entry.bind('<Return>', self._attempt_login)
+
+
+    def _build_login_ui(self):
+        """Creates the widgets for the login screen."""
+        ttk.Label(self.login_frame, text="Login", font=('Segoe UI', 16, 'bold')).grid(row=0, column=0, columnspan=2, pady=10)
+
+        ttk.Label(self.login_frame, text="Username:").grid(row=1, column=0, sticky="w", padx=5, pady=5)
+        self.username_var = tk.StringVar()
+        self.username_entry = ttk.Entry(self.login_frame, textvariable=self.username_var, width=25)
+        self.username_entry.grid(row=1, column=1, padx=5, pady=5)
+
+        ttk.Label(self.login_frame, text="Password:").grid(row=2, column=0, sticky="w", padx=5, pady=5)
+        self.password_var = tk.StringVar()
+        self.password_entry = ttk.Entry(self.login_frame, textvariable=self.password_var, show="*", width=25)
+        self.password_entry.grid(row=2, column=1, padx=5, pady=5)
+
+        login_button = ttk.Button(self.login_frame, text="Login", command=self._attempt_login, style="Accent.TButton")
+        login_button.grid(row=3, column=0, columnspan=2, pady=20)
+
+        # Set focus to username entry initially
+        self.username_entry.focus_set()
+
+    def _attempt_login(self, event=None): # Added event=None for binding
+        """Checks credentials against DB and proceeds if correct."""
+        username = self.username_var.get().strip()
+        password = self.password_var.get() # Don't strip password
+
+        if not username or not password:
+            messagebox.showerror("Login Failed", "Username and Password cannot be empty.", parent=self.root)
+            return
+
+        try:
+            # 1. Find user by user_id
+            user_doc = user_col.find_one({"user_id": username})
+            if not user_doc:
+                messagebox.showerror("Login Failed", "Invalid username or password.", parent=self.root)
+                print(f"[WARN] Login failed: User '{username}' not found.")
+                self.password_var.set("")
+                self.password_entry.focus_set()
+                return
+
+            # 2. Check user role
+            user_role = user_doc.get("role")
+            allowed_roles = ["manager", "security"]
+            if user_role not in allowed_roles:
+                messagebox.showerror("Login Failed", "Access denied. Insufficient privileges.", parent=self.root)
+                print(f"[WARN] Login failed: User '{username}' role '{user_role}' not allowed.")
+                self.password_var.set("")
+                self.password_entry.focus_set()
+                return
+
+            # 3. Verify password using bcrypt
+            stored_hash = user_doc.get("password")
+            if not stored_hash:
+                 messagebox.showerror("Login Error", "User account configuration issue (missing password hash).", parent=self.root)
+                 print(f"[ERROR] Login failed: User '{username}' has no password hash in DB.")
+                 return
+
+            # Ensure password and hash are bytes for bcrypt
+            if bcrypt.checkpw(password.encode('utf-8'), stored_hash.encode('utf-8')):
+                # Password matches
+                print(f"[INFO] User '{username}' password verified.")
+
+                # 4. Find associated active employee and property
+                employee_doc = employee_col.find_one({"userid": username, "status": "active"})
+                if not employee_doc:
+                    messagebox.showerror("Login Failed", "No active employee record found for this user.", parent=self.root)
+                    print(f"[WARN] Login failed: No active employee record for user '{username}'.")
+                    self.password_var.set("")
+                    self.password_entry.focus_set()
+                    return
+
+                assigned_p_id_str = employee_doc.get("p_id")
+                if not assigned_p_id_str:
+                     messagebox.showerror("Login Error", "Employee account configuration issue (missing property assignment).", parent=self.root)
+                     print(f"[ERROR] Login failed: Employee record for '{username}' has no p_id.")
+                     return
+
+                # 5. Fetch the assigned property details
+                property_document = property_col.find_one({"property_id": assigned_p_id_str})
+                if not property_document:
+                     messagebox.showerror("Login Error", f"Assigned property '{assigned_p_id_str}' not found in database.", parent=self.root)
+                     print(f"[ERROR] Login failed: Property '{assigned_p_id_str}' for user '{username}' not found.")
+                     return
+
+                # 6. Store user info and proceed
+                self.logged_in_user_role = user_role
+                self.assigned_property_id_str = assigned_p_id_str
+                self.assigned_property_doc = property_document # Store the whole doc
+                print(f"[INFO] Login successful for user '{username}' (Role: {user_role}, Property: {self.assigned_property_doc.get('name', assigned_p_id_str)}).")
+
+                # --- Proceed to main application ---
+                self.login_frame.destroy() # Remove login widgets
+                self._build_main_ui()      # Build the main application UI
+                self.main_app_frame.pack(fill="both", expand=True) # Show the main app frame
+                # Resize window for the main application
+                self.root.geometry("1200x750")
+                self.root.minsize(1100, 700)
+                self.root.title(f"🚗 Parking Management System - Property: {self.assigned_property_doc.get('name', assigned_p_id_str)}") # Update title
+                # Start camera for the initially selected tab after UI is built
+                self.root.after(150, self._trigger_initial_camera_start)
+
+            else:
+                # Password does not match
+                messagebox.showerror("Login Failed", "Invalid username or password.", parent=self.root)
+                print(f"[WARN] Login failed: Incorrect password for user '{username}'.")
+                self.password_var.set("")
+                self.password_entry.focus_set()
+                return
+
+        except pymongo.errors.ConnectionFailure as e:
+             messagebox.showerror("Database Error", f"Could not connect to database during login:\n{e}", parent=self.root)
+             print(f"[ERROR] DB Connection Failure during login: {e}")
+        except Exception as e:
+            messagebox.showerror("Login Error", f"An unexpected error occurred during login:\n{e}", parent=self.root)
+            print(f"[ERROR] Unexpected login error: {e}")
+            traceback.print_exc()
+            self.password_var.set("")
+            self.password_entry.focus_set()
+
+
+    def _build_main_ui(self):
+        """Builds the main application UI after successful login."""
         # --- Top Bar for Date/Time ---
-        self.top_bar = ttk.Frame(root, padding=(10, 5))
+        self.top_bar = ttk.Frame(self.main_app_frame, padding=(10, 5))
         self.top_bar.pack(side="top", fill="x")
 
         self.datetime_label = ttk.Label(self.top_bar, text="Loading date/time...", font=('Segoe UI', 10))
@@ -439,31 +602,41 @@ class ParkingApp:
         self._update_datetime() # Start the clock
 
         # --- Main Structure: Notebook with Tabs ---
-        self.nav = ttk.Notebook(root)
+        self.nav = ttk.Notebook(self.main_app_frame)
         self.entry_tab = ttk.Frame(self.nav, padding=10)
         self.exit_tab  = ttk.Frame(self.nav, padding=10)
         self.settings_tab = ttk.Frame(self.nav, padding=10)
 
         self.nav.add(self.entry_tab, text="🚙 Entry")
         self.nav.add(self.exit_tab, text="🏁 Exit")
-        self.nav.add(self.settings_tab, text="⚙️ Settings")
+        # Only show settings tab for managers (optional)
+        if self.logged_in_user_role == 'manager':
+            self.nav.add(self.settings_tab, text="⚙️ Settings")
+
         self.nav.pack(fill="both", expand=True, padx=5, pady=(0, 5)) # Reduced pady top
 
         # Build UI elements for each tab
         self._build_tab(self.entry_tab, is_entry=True)
         self._build_tab(self.exit_tab, is_entry=False)
-        self._build_settings_tab(self.settings_tab)
+        if self.logged_in_user_role == 'manager':
+            self._build_settings_tab(self.settings_tab)
 
         # Bind events
         self.nav.bind("<<NotebookTabChanged>>", self._on_tab_change) # Handle tab switching
-        self.root.bind('<Return>', self._on_enter_press) # Allow Enter key to trigger capture
+        # Unbind Return from root, it's now bound to password entry for login
+        # self.root.unbind('<Return>') # Or just don't bind it globally initially
+        # Re-bind Enter key press globally for capture (if desired after login)
+        self.root.bind('<Return>', self._on_enter_press_main)
 
-        # Start camera for the initially selected tab after a short delay
-        # Ensures the window is fully drawn and dimensions are available
-        self.root.after(150, self._trigger_initial_camera_start)
 
     def _update_datetime(self):
         """Updates the date and time label."""
+        # Check if the label exists before trying to configure it
+        if not hasattr(self, 'datetime_label') or not self.datetime_label.winfo_exists():
+            # print("[INFO] Datetime label does not exist, stopping update.") # Can be noisy
+            self.datetime_after_id = None
+            return
+
         now = datetime.now()
         # Format: Day, DD Mon YYYY HH:MM:SS AM/PM
         dt_string = now.strftime("%a, %d %b %Y %I:%M:%S %p")
@@ -473,11 +646,17 @@ class ParkingApp:
             self.datetime_after_id = self.root.after(1000, self._update_datetime)
         except tk.TclError:
              # Handle error if the widget is destroyed before the update runs (e.g., during closing)
-             print("[INFO] Datetime label update skipped, widget likely destroyed.")
+             # print("[INFO] Datetime label update skipped, widget likely destroyed.") # Can be noisy
+             pass
 
-    def _on_enter_press(self, event):
-        """Handles the Enter key press to trigger capture on the current tab if button enabled."""
+
+    def _on_enter_press_main(self, event):
+        """Handles the Enter key press AFTER LOGIN to trigger capture."""
         ## ANALYSIS: Convenience feature to trigger capture with Enter key. Checks focus to avoid interfering with text entry.
+        # Check if main UI components exist before proceeding
+        if not hasattr(self, 'nav') or not self.nav.winfo_exists():
+            return # Main UI not built yet
+
         focused_widget = self.root.focus_get()
         # Don't trigger if focus is on an input field or the log text area
         if isinstance(focused_widget, (tk.Entry, ttk.Entry, scrolledtext.ScrolledText, ttk.Combobox)):
@@ -495,13 +674,17 @@ class ParkingApp:
                     if hasattr(current_tab_widget, '_btn_capture') and current_tab_widget._btn_capture['state'] == tk.NORMAL:
                         current_tab_widget.trigger_capture() # Call the tab's capture function
         except tk.TclError:
-            print("[WARN] Error getting current tab widget on Enter.")
+            print("[WARN] Error getting current tab widget on Enter (main).")
         except Exception as e:
-            print(f"[ERROR] During Enter press handling: {e}")
+            print(f"[ERROR] During Enter press handling (main): {e}")
 
     def _on_tab_change(self, event):
         """Handles tab changes: stops camera on old tab, starts on new (if applicable)."""
         ## ANALYSIS: Manages camera resources efficiently by only running the camera for the active Entry/Exit tab.
+        # Check if main UI components exist before proceeding
+        if not hasattr(self, 'nav') or not self.nav.winfo_exists():
+            return # Main UI not built yet
+
         newly_selected_tab_widget = None
         try:
             newly_selected_tab_name = self.nav.select()
@@ -510,9 +693,14 @@ class ParkingApp:
         except tk.TclError:
             print("[WARN] Error getting newly selected tab widget."); return
 
+        # Determine which tabs exist based on role
+        active_tabs = [self.entry_tab, self.exit_tab]
+        if self.logged_in_user_role == 'manager' and hasattr(self, 'settings_tab'):
+             active_tabs.append(self.settings_tab)
+
         # Stop camera on any tab that is *not* the newly selected one
-        for tab in (self.entry_tab, self.exit_tab, self.settings_tab):
-            if tab and tab != newly_selected_tab_widget:
+        for tab in active_tabs:
+            if tab and tab.winfo_exists() and tab != newly_selected_tab_widget: # Check if tab exists
                 # Check if the tab has a 'stop_camera' method
                 if hasattr(tab, 'stop_camera') and callable(getattr(tab, 'stop_camera')):
                     try:
@@ -534,14 +722,19 @@ class ParkingApp:
                         )
                 except Exception as e:
                     print(f"[ERROR] Starting camera or loading logs on tab change: {e}")
-        # Refresh property list if Settings tab is selected
+        # Refresh property list (now just details) if Settings tab is selected
         elif newly_selected_tab_widget == self.settings_tab:
-             if hasattr(self.settings_tab, '_load_properties_into_list'):
-                 self.settings_tab._load_properties_into_list()
+             if hasattr(self.settings_tab, '_load_assigned_property_details'):
+                 self.settings_tab._load_assigned_property_details() # Load assigned property
 
     def _trigger_initial_camera_start(self):
         """Trigger the start_camera for the initially selected tab."""
         ## ANALYSIS: Ensures the camera starts when the app launches for the default tab.
+        # Check if main UI components exist before proceeding
+        if not hasattr(self, 'nav') or not self.nav.winfo_exists():
+            print("[INFO] Main UI not ready for initial camera start.")
+            return # Main UI not built yet
+
         try:
             current_tab_name = self.nav.select() # Get the ID of the initially selected tab
             if not current_tab_name: return
@@ -578,7 +771,8 @@ class ParkingApp:
         s.configure("Header.TLabel", font=('Segoe UI', 12, 'bold'), background="#f0f0f0")
         s.configure("TEntry", fieldbackground="white", foreground="#333")
         s.configure("TCombobox", fieldbackground="white", foreground="#333")
-        s.map("TCombobox", fieldbackground=[('readonly','white')]) # Ensure readonly combobox bg is white
+        s.map("TCombobox", fieldbackground=[('readonly','white'), ('disabled', '#e0e0e0')]) # Ensure disabled bg is greyish
+        s.map("TCombobox", foreground=[('disabled', '#555')]) # Darker grey text when disabled
         s.configure("TRadiobutton", background="#f0f0f0", font=('Segoe UI', 10))
 
         # Notebook styling
@@ -624,9 +818,9 @@ class ParkingApp:
 
 
     def _build_tab(self, frame, is_entry):
-        """Builds the UI elements for Entry or Exit tabs."""
+        """Builds the UI elements for Entry or Exit tabs, using the assigned property."""
         ## ANALYSIS: Constructs the common layout for Entry/Exit tabs (camera feed, controls, log).
-        ## ANALYSIS: Dynamically enables/disables buttons based on camera/property availability.
+        ## ANALYSIS: Property selection is now disabled and pre-filled.
         frame.columnconfigure(0, weight=2) # Video side takes more space
         frame.columnconfigure(1, weight=1) # Log side
         frame.rowconfigure(0, weight=1) # Allow row to expand vertically
@@ -644,33 +838,20 @@ class ParkingApp:
         left_frame.rowconfigure(4, weight=1) # Video Canvas (expands most)
         left_frame.rowconfigure(5, weight=0) # Buttons
 
-        # --- Property Selection ---
+        # --- Property Display (Read-only) ---
         prop_frame = ttk.Frame(left_frame)
         prop_frame.grid(row=0, column=0, sticky="ew", pady=(0, 5))
         ttk.Label(prop_frame, text="Property:", width=8).pack(side="left", padx=(0, 5))
         prop_var = tk.StringVar()
-        names = [] # Default to empty list
-        property_available = False
-        try:
-            # Fetch only name and _id, sort by name
-            props = list(property_col.find({}, {"name": 1}).sort("name", 1))
-            names = [p['name'] for p in props if 'name' in p]
-            property_available = bool(names)
-        except Exception as e:
-            print(f"[ERROR] Fetching properties: {e}")
-            names = ["DB Error"] # Show error in combobox
-            messagebox.showerror("DB Error", f"Could not fetch properties: {e}")
+        assigned_prop_name = self.assigned_property_doc.get('name', 'N/A') if self.assigned_property_doc else "Error"
+        prop_var.set(assigned_prop_name)
 
-        cbp = ttk.Combobox(prop_frame, textvariable=prop_var, values=names, state="readonly", width=30)
-        if property_available:
-            cbp.current(0) # Select first property by default
-        elif names == ["DB Error"]:
-             cbp.set("DB Error")
-             cbp.config(state="disabled")
-        else:
-            cbp.set("No Properties Found") # Placeholder if no properties exist
-            cbp.config(state="disabled")
-        cbp.pack(side="left", fill="x", expand=True)
+        # Use a disabled Entry or Label to display the property name
+        # A disabled Combobox looks slightly different, Entry might be clearer
+        prop_display = ttk.Entry(prop_frame, textvariable=prop_var, state="readonly", width=30)
+        # Or use a Label:
+        # prop_display = ttk.Label(prop_frame, textvariable=prop_var, width=30, relief="sunken", anchor="w")
+        prop_display.pack(side="left", fill="x", expand=True)
 
         # --- Available Slots Display ---
         slots_lbl = ttk.Label(left_frame, text="Slots: N/A", font=('Segoe UI', 10))
@@ -712,6 +893,7 @@ class ParkingApp:
         btn_manual.pack(side="left")
 
         # Initial button states based on property and camera availability
+        property_available = bool(self.assigned_property_doc) # Check if property doc loaded
         if not property_available or not AVAILABLE_CAMERAS:
             btn_capture.config(state="disabled")
         if not property_available:
@@ -719,9 +901,9 @@ class ParkingApp:
 
         # More specific disabled text
         if not property_available and not AVAILABLE_CAMERAS:
-             btn_capture.config(text="🚫 Setup Required")
+             btn_capture.config(text="🚫 Property/Cam Error")
         elif not property_available:
-             btn_capture.config(text="🚫 Add Property First")
+             btn_capture.config(text="🚫 Property Error")
         elif not AVAILABLE_CAMERAS:
              btn_capture.config(text="🚫 No Camera Found")
 
@@ -767,34 +949,25 @@ class ParkingApp:
             full_message = f"{timestamp} {prefix} {message}\n"
             print(full_message.strip()) # Print status/debug to console
 
-        # --- Refresh Slots Function ---
+        # --- Refresh Slots Function (Uses assigned property) ---
         def refresh_slots_typed(*args):
-            """Updates the available slots label based on selected property and vehicle type."""
-            selected_prop_name = prop_var.get()
-            v_type = vehicle_type_var.get().lower() # Use lowercase for keys
-            if selected_prop_name and selected_prop_name != "No Properties Found" and selected_prop_name != "DB Error":
-                try:
-                    # Fetch only the needed fields
-                    projection = {f"available_parking_spaces_{v_type}": 1, f"parking_spaces_{v_type}": 1}
-                    doc = property_col.find_one({"name": selected_prop_name}, projection)
-                    if doc:
-                        avail = doc.get(f'available_parking_spaces_{v_type}', 'N/A')
-                        total = doc.get(f'parking_spaces_{v_type}', 'N/A')
-                        slots_lbl.config(text=f"Slots ({v_type.capitalize()}): {avail} / {total}")
-                    else:
-                        slots_lbl.config(text=f"Slots ({v_type.capitalize()}): Error")
-                        print(f"[WARN] Property '{selected_prop_name}' not found during slot refresh.")
-                except pymongo.errors.ConnectionFailure:
-                    slots_lbl.config(text="Slots: DB Error")
-                    print(f"[ERROR] DB connection error during slot refresh.")
-                except Exception as e:
-                    slots_lbl.config(text="Slots: Error")
-                    print(f"[ERROR] DB error refreshing slots: {e}")
-            else:
-                slots_lbl.config(text="Slots: N/A") # Reset if no property selected
+            """Updates the available slots label based on assigned property and vehicle type."""
+            if not self.assigned_property_doc:
+                slots_lbl.config(text="Slots: Property Error")
+                return
 
-        # Trace changes in property selection and vehicle type to update slots
-        prop_var.trace_add('write', refresh_slots_typed)
+            v_type = vehicle_type_var.get().lower() # Use lowercase for keys
+            try:
+                # Get counts directly from the stored property document
+                avail = self.assigned_property_doc.get(f'available_parking_spaces_{v_type}', 'N/A')
+                total = self.assigned_property_doc.get(f'parking_spaces_{v_type}', 'N/A')
+                slots_lbl.config(text=f"Slots ({v_type.capitalize()}): {avail} / {total}")
+            except Exception as e:
+                slots_lbl.config(text="Slots: Error")
+                print(f"[ERROR] Error refreshing slots from assigned property doc: {e}")
+
+
+        # Trace changes vehicle type to update slots (property is fixed)
         vehicle_type_var.trace_add('write', refresh_slots_typed)
         # Initial call to set slots based on default selection
         if property_available:
@@ -805,7 +978,7 @@ class ParkingApp:
         frame._log_widget = log # Reference to the log display widget
         frame._append_log = append_log # Reference to the console log function
         frame._canvas = canvas # Reference to the video display label
-        frame._prop_var = prop_var # Reference to property selection variable
+        # frame._prop_var = prop_var # No longer needed as property is fixed
         frame._refresh_slots = refresh_slots_typed # Reference to slot refresh function
         frame._vehicle_type_var = vehicle_type_var # Reference to vehicle type variable
         frame._cam_name_var = cam_name_var # Reference to camera selection variable
@@ -822,9 +995,6 @@ class ParkingApp:
                         frame._canvas.after_cancel(frame._state['after_id'])
                     except tk.TclError: pass # Ignore if already cancelled/destroyed
                     frame._state['after_id'] = None
-                # Optionally update canvas text to 'Camera disconnected' or similar
-                # frame._canvas.config(image='', text="Camera Disconnected")
-                # frame._canvas.imgtk = None
                 return
 
             try:
@@ -849,7 +1019,6 @@ class ParkingApp:
                     # Update the canvas label
                     frame._canvas.imgtk = photo # Keep a reference! Important.
                     frame._canvas.config(image=photo, text="") # Display image, clear text
-                # else: print(f"[WARN] Failed to read frame from {cam_name_var.get()}") # Optional: log frame read failures
 
             except Exception as e:
                 print(f"[ERROR] in update_feed cam {cam_name_var.get()}: {e}")
@@ -933,13 +1102,13 @@ class ParkingApp:
                 frame._canvas.config(text="") # Clear "Starting..." text
             except tk.TclError: pass # Ignore if widget destroyed
 
-            # Enable buttons if property is also selected
+            # Enable buttons if property doc loaded successfully
             try:
-                if prop_var.get() and prop_var.get() != "No Properties Found" and prop_var.get() != "DB Error":
+                if self.assigned_property_doc:
                     btn_capture.config(state="normal", text="📸 Capture & Process")
                     btn_manual.config(state="normal")
                 else:
-                    btn_capture.config(state="disabled", text="🚫 Select Property")
+                    btn_capture.config(state="disabled", text="🚫 Property Error")
                     btn_manual.config(state="disabled")
             except tk.TclError: pass # Ignore if buttons destroyed
 
@@ -967,16 +1136,16 @@ class ParkingApp:
                 frame._canvas.imgtk = None # Clear image reference
             except tk.TclError: pass # Ignore if widget destroyed
 
-            # Disable capture button, re-enable manual button if property selected
+            # Disable capture button, re-enable manual button if property loaded
             try:
                 if btn_capture['state'] == tk.NORMAL:
                      btn_capture.config(state="disabled", text="🚫 Camera Stopped")
                 # Check property status before enabling manual button
-                if prop_var.get() and prop_var.get() != "No Properties Found" and prop_var.get() != "DB Error":
+                if self.assigned_property_doc:
                      if btn_manual['state'] == tk.DISABLED:
                           btn_manual.config(state="normal")
                 else:
-                     # Ensure manual button is disabled if no property selected
+                     # Ensure manual button is disabled if no property loaded
                      if btn_manual['state'] == tk.NORMAL:
                           btn_manual.config(state="disabled")
             except tk.TclError: pass # Ignore if buttons destroyed
@@ -984,12 +1153,16 @@ class ParkingApp:
         # --- Define and Attach Button Commands ---
         # Use lambda or functools.partial if needed, but direct assignment works here
         def trigger_capture_local():
-            self._capture_and_edit(frame, is_entry, append_log, prop_var.get(), vehicle_type_var.get(), refresh_slots_typed, btn_capture, btn_manual)
+            # Pass the assigned property name
+            prop_name = self.assigned_property_doc.get('name', 'Error') if self.assigned_property_doc else 'Error'
+            self._capture_and_edit(frame, is_entry, append_log, prop_name, vehicle_type_var.get(), refresh_slots_typed, btn_capture, btn_manual)
         frame.trigger_capture = trigger_capture_local # Store function ref on frame for Enter key access
         btn_capture.config(command=trigger_capture_local)
 
         def trigger_manual_local():
-            self._manual_entry_exit(frame, is_entry, append_log, prop_var.get(), vehicle_type_var.get(), refresh_slots_typed, btn_capture, btn_manual)
+             # Pass the assigned property name
+            prop_name = self.assigned_property_doc.get('name', 'Error') if self.assigned_property_doc else 'Error'
+            self._manual_entry_exit(frame, is_entry, append_log, prop_name, vehicle_type_var.get(), refresh_slots_typed, btn_capture, btn_manual)
         btn_manual.config(command=trigger_manual_local)
 
         # Attach command to the Refresh Log button
@@ -1005,56 +1178,26 @@ class ParkingApp:
         cbcam.bind("<<ComboboxSelected>>", start_camera)
 
         # Load initial logs for this tab (will be done by _trigger_initial_camera_start or _on_tab_change)
-        # self._load_logs(frame._log_widget, is_entry, frame._log_date_var.get()) # Moved initial load
 
     # --- Build Settings Tab ---
     def _build_settings_tab(self, frame):
-        """Builds the UI for the Settings tab."""
-        ## ANALYSIS: Provides interface for viewing properties and editing their details (spaces, fees).
-        ## ANALYSIS: Includes date range selection and button for CSV export.
-        ## ANALYSIS: Add/Delete property functionality is missing.
-        frame.columnconfigure(0, weight=1) # Property list
-        frame.columnconfigure(1, weight=2) # Details and Export
-        frame.rowconfigure(1, weight=1) # Allow property list to expand
-        # frame.rowconfigure(3, weight=1) # Allow export section some space - Removed, adjusted grid rows
+        """Builds the UI for the Settings tab (Manager role only). Shows assigned property."""
+        ## ANALYSIS: Provides interface for viewing/editing assigned property details.
+        ## ANALYSIS: No property list needed.
+        frame.columnconfigure(0, weight=1) # Details frame takes full width now
+        frame.columnconfigure(1, weight=1) # Export frame takes full width now
+        frame.rowconfigure(0, weight=0)
+        frame.rowconfigure(1, weight=0)
 
-        # --- Property Management Section ---
-        prop_mgmt_frame = ttk.LabelFrame(frame, text="Property Management", padding=10)
-        prop_mgmt_frame.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 10), pady=(0, 5)) # Spans 2 rows now
-        prop_mgmt_frame.rowconfigure(0, weight=1) # Treeview expands
-        prop_mgmt_frame.columnconfigure(0, weight=1) # Treeview expands
 
-        # Property List Treeview
-        cols = ("name", "cars", "bikes")
-        tree = ttk.Treeview(prop_mgmt_frame, columns=cols, show='headings', selectmode='browse')
-        tree.heading("name", text="Name")
-        tree.heading("cars", text="Car Slots")
-        tree.heading("bikes", text="Bike Slots")
-        tree.column("name", width=150, anchor='w') # Anchor name left
-        tree.column("cars", width=80, anchor='center')
-        tree.column("bikes", width=80, anchor='center')
-        tree.grid(row=0, column=0, sticky="nsew")
-
-        # Scrollbar for Treeview
-        scrollbar = ttk.Scrollbar(prop_mgmt_frame, orient="vertical", command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-
-        # Buttons below Property List
-        prop_button_frame = ttk.Frame(prop_mgmt_frame)
-        prop_button_frame.grid(row=1, column=0, columnspan=2, pady=(10, 0), sticky='ew')
-        # Add button - Currently shows 'Not Implemented' message
-        ttk.Button(prop_button_frame, text="➕ Add New", command=lambda: self._add_edit_property(None)).pack(side="left", padx=5)
-        # TODO: Add Edit and Delete buttons here, bind them to _add_edit_property(selected_id) and a new _delete_property function
-
-        # --- Details & Fees Section ---
-        details_frame = ttk.LabelFrame(frame, text="Details & Fees", padding=10)
-        details_frame.grid(row=0, column=1, sticky="nsew", pady=(0, 5)) # Row 0
+        # --- Details & Fees Section (Assigned Property) ---
+        details_frame = ttk.LabelFrame(frame, text="Assigned Property Details & Fees", padding=10)
+        details_frame.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 5)) # Span both columns
         details_frame.columnconfigure(1, weight=1) # Allow entry fields to expand slightly
 
         ttk.Label(details_frame, text="Property Name:").grid(row=0, column=0, sticky="w", padx=5, pady=3)
         frame._prop_name_var = tk.StringVar()
-        ttk.Entry(details_frame, textvariable=frame._prop_name_var, state="readonly", width=30).grid(row=0, column=1, sticky="ew", padx=5, pady=3) # Name is usually read-only here, edited via Add/Edit dialog
+        ttk.Entry(details_frame, textvariable=frame._prop_name_var, state="readonly", width=30).grid(row=0, column=1, sticky="ew", padx=5, pady=3)
 
         ttk.Label(details_frame, text="Total Car Spaces:").grid(row=1, column=0, sticky="w", padx=5, pady=3)
         frame._prop_spaces_car_var = tk.StringVar()
@@ -1079,8 +1222,7 @@ class ParkingApp:
 
         # --- Export Records Section ---
         export_frame = ttk.LabelFrame(frame, text="Export Parking Records", padding=10)
-        # Place it below the details frame
-        export_frame.grid(row=1, column=1, sticky="nsew", pady=(5, 0)) # Changed row from 2 to 1
+        export_frame.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(5, 0)) # Span both columns
         export_frame.columnconfigure(1, weight=1)
 
         # Start Date Entry
@@ -1096,104 +1238,66 @@ class ParkingApp:
         # Export Button
         ttk.Button(export_frame, text="⬇️ Export to CSV", command=self._export_records_date_range).grid(row=2, column=0, columnspan=2, pady=10)
 
-        # --- Bind selection event & Store refs ---
-        tree.bind("<<TreeviewSelect>>", self._on_property_select)
-        frame._settings_tree = tree # Store tree reference on the frame
-
         # Store function ref for easy calling on tab change
-        frame._load_properties_into_list = lambda: self._load_properties_into_list(frame._settings_tree)
+        frame._load_assigned_property_details = lambda: self._load_assigned_property_details(frame)
 
-        # Initial load of properties into the list
-        frame._load_properties_into_list()
+        # Initial load of assigned property details
+        frame._load_assigned_property_details()
 
     # --- Settings Tab Helper Functions ---
-    def _load_properties_into_list(self, tree):
-        """Clears and reloads the property list in the settings tab."""
-        ## ANALYSIS: Fetches properties from DB and populates the Treeview.
-        # Clear existing items
-        for item in tree.get_children():
-            tree.delete(item)
+    def _load_assigned_property_details(self, settings_tab_frame):
+        """Loads the details of the assigned property into the settings tab fields."""
+        if not self.assigned_property_doc:
+            print("[WARN] Assigned property document not available for settings tab.")
+            self._clear_property_details(settings_tab_frame) # Clear fields if no doc
+            messagebox.showerror("Error", "Could not load assigned property details.", parent=self.root)
+            return
+
         try:
-            # Fetch necessary fields, sort by name
-            properties = list(property_col.find({}, {"name": 1, "parking_spaces_car": 1, "parking_spaces_bike": 1, "_id": 1}).sort("name", 1))
-            for prop in properties:
-                # Use MongoDB ObjectId as the item ID (iid) in the tree
-                tree.insert("", "end", iid=str(prop['_id']), values=(
-                    prop.get("name", "N/A"),
-                    prop.get("parking_spaces_car", 0),
-                    prop.get("parking_spaces_bike", 0)
-                ))
+            prop_data = self.assigned_property_doc
+            # Populate the entry fields
+            settings_tab_frame._prop_name_var.set(prop_data.get("name", ""))
+            settings_tab_frame._prop_spaces_car_var.set(str(prop_data.get("parking_spaces_car", 0)))
+            settings_tab_frame._prop_spaces_bike_var.set(str(prop_data.get("parking_spaces_bike", 0)))
+            settings_tab_frame._prop_fee_car_var.set(str(prop_data.get("fee_per_hour_car", 0.0)))
+            settings_tab_frame._prop_fee_bike_var.set(str(prop_data.get("fee_per_hour_bike", 0.0)))
+            # Store the assigned property's MongoDB ObjectId for the save function
+            settings_tab_frame._selected_prop_id = prop_data.get("_id") # Get the actual ObjectId
         except Exception as e:
-            print(f"[ERROR] Loading properties: {e}")
-            messagebox.showerror("DB Error", f"Failed to load properties: {e}", parent=self.root)
+            print(f"[ERROR] Populating settings tab with assigned property details: {e}")
+            messagebox.showerror("UI Error", f"Failed load assigned property details: {e}", parent=self.root)
+            self._clear_property_details(settings_tab_frame)
 
-    def _on_property_select(self, event):
-        """Handles selection change in the settings property list, loads details."""
-        ## ANALYSIS: Updates the detail fields when a property is selected in the Treeview.
-        tree = event.widget
-        selected_items = tree.selection()
-        if not selected_items:
-            self._clear_property_details()
-            return # Nothing selected
-
-        selected_iid = selected_items[0] # Get the iid (which is the ObjectId string)
-        try:
-            prop_id = ObjectId(selected_iid) # Convert string back to ObjectId
-            prop_data = property_col.find_one({"_id": prop_id}) # Fetch full details
-            if prop_data:
-                # Populate the entry fields
-                self.settings_tab._prop_name_var.set(prop_data.get("name", ""))
-                self.settings_tab._prop_spaces_car_var.set(str(prop_data.get("parking_spaces_car", 0)))
-                self.settings_tab._prop_spaces_bike_var.set(str(prop_data.get("parking_spaces_bike", 0)))
-                self.settings_tab._prop_fee_car_var.set(str(prop_data.get("fee_per_hour_car", 0.0)))
-                self.settings_tab._prop_fee_bike_var.set(str(prop_data.get("fee_per_hour_bike", 0.0)))
-                # Store the selected ObjectId for the save function
-                self.settings_tab._selected_prop_id = prop_id
-            else:
-                print(f"[WARN] Property {selected_iid} not found in DB during selection.")
-                self._clear_property_details()
-        except Exception as e:
-            print(f"[ERROR] Fetching property details {selected_iid}: {e}")
-            messagebox.showerror("DB Error", f"Failed load details: {e}", parent=self.root)
-            self._clear_property_details()
-
-    def _clear_property_details(self):
+    def _clear_property_details(self, settings_tab_frame):
         """Clears the property detail fields in the settings tab."""
         try:
-            self.settings_tab._prop_name_var.set("")
-            self.settings_tab._prop_spaces_car_var.set("")
-            self.settings_tab._prop_spaces_bike_var.set("")
-            self.settings_tab._prop_fee_car_var.set("")
-            self.settings_tab._prop_fee_bike_var.set("")
-            self.settings_tab._selected_prop_id = None # Clear selected ID
+            settings_tab_frame._prop_name_var.set("")
+            settings_tab_frame._prop_spaces_car_var.set("")
+            settings_tab_frame._prop_spaces_bike_var.set("")
+            settings_tab_frame._prop_fee_car_var.set("")
+            settings_tab_frame._prop_fee_bike_var.set("")
+            settings_tab_frame._selected_prop_id = None # Clear selected ID
         except AttributeError:
+            # This might happen if called before widgets are fully created
             print("[WARN] Could not clear property details, widgets might not exist yet.")
 
 
     def _add_edit_property(self, prop_id=None):
-        """Placeholder for Add/Edit Property Dialog."""
-        ## ANALYSIS: This functionality is not implemented yet.
+        """Placeholder for Add/Edit Property Dialog. (Likely not needed if users are assigned)."""
         action = "Edit" if prop_id else "Add"
-        messagebox.showinfo("Not Implemented", f"{action} Property functionality is not yet implemented.", parent=self.root)
-        # TODO: Implement a dialog (similar to EditableDialog) to get property details (name, spaces, fees)
-        # If adding, insert new doc into property_col.
-        # If editing, update doc with _id = prop_id.
-        # Remember to initialize available spaces = total spaces when adding.
-        # After add/edit, refresh the list: self.settings_tab._load_properties_into_list()
-        # Also refresh property comboboxes on Entry/Exit tabs.
+        messagebox.showinfo("Not Implemented", f"{action} Property functionality is currently disabled or not implemented.", parent=self.root)
+
 
     def _save_property_details(self):
-        """Saves the edited details of the currently selected property."""
-        ## ANALYSIS: Updates the selected property's details in the DB based on entry fields. Includes validation.
+        """Saves the edited details of the assigned property."""
+        ## ANALYSIS: Updates the assigned property's details in the DB.
         if not hasattr(self.settings_tab, '_selected_prop_id') or not self.settings_tab._selected_prop_id:
-            messagebox.showwarning("No Selection", "Please select a property from the list to save changes.", parent=self.root)
+            messagebox.showwarning("No Property", "Cannot save changes, assigned property ID not found.", parent=self.root)
             return
 
-        prop_id = self.settings_tab._selected_prop_id
+        prop_mongo_id = self.settings_tab._selected_prop_id # Get the MongoDB _id
         try:
             # Read and validate inputs
-            # Name is read-only here, so we don't get it from the var
-            # name = self.settings_tab._prop_name_var.get().strip() # If name were editable
             spaces_car_str = self.settings_tab._prop_spaces_car_var.get()
             spaces_bike_str = self.settings_tab._prop_spaces_bike_var.get()
             fee_car_str = self.settings_tab._prop_fee_car_var.get()
@@ -1209,7 +1313,6 @@ class ParkingApp:
             fee_bike = float(fee_bike_str)
 
             # Basic validation
-            # if not name: raise ValueError("Property name cannot be empty.") # If name were editable
             if spaces_car < 0 or spaces_bike < 0:
                 raise ValueError("Number of parking spaces cannot be negative.")
             if fee_car < 0 or fee_bike < 0:
@@ -1223,107 +1326,116 @@ class ParkingApp:
             return
 
         try:
-            # Prepare update data - only update fields editable here
-            # Note: We don't update 'available' spaces here, only total capacity and fees.
-            # Name is not updated as the entry is read-only.
+            # Fetch the current available spaces before updating totals
+            current_prop_doc = property_col.find_one({"_id": prop_mongo_id})
+            if not current_prop_doc:
+                messagebox.showerror("Save Error", "Could not find the assigned property in the database to update.", parent=self.root)
+                return
+
+            current_available_car = current_prop_doc.get("available_parking_spaces_car", 0)
+            current_available_bike = current_prop_doc.get("available_parking_spaces_bike", 0)
+            current_total_car = current_prop_doc.get("parking_spaces_car", 0)
+            current_total_bike = current_prop_doc.get("parking_spaces_bike", 0)
+
+            # Calculate the difference in total spaces
+            diff_car = spaces_car - current_total_car
+            diff_bike = spaces_bike - current_total_bike
+
+            # Adjust available spaces based on the change in total spaces
+            # Ensure available doesn't exceed new total or go below zero
+            new_available_car = max(0, min(spaces_car, current_available_car + diff_car))
+            new_available_bike = max(0, min(spaces_bike, current_available_bike + diff_bike))
+
+
+            # Prepare update data - update totals, fees, and adjusted available counts
             update_data = {
                 "$set": {
-                    # "name": name, # Include if name were editable
                     "parking_spaces_car": spaces_car,
                     "parking_spaces_bike": spaces_bike,
+                    "available_parking_spaces_car": new_available_car, # Update available based on change
+                    "available_parking_spaces_bike": new_available_bike, # Update available based on change
                     "fee_per_hour_car": fee_car,
                     "fee_per_hour_bike": fee_bike
+                    # Add other fee fields if they become editable (e.g., one_hour_rate)
                 }
             }
-            result = property_col.update_one({"_id": prop_id}, update_data)
+            result = property_col.update_one({"_id": prop_mongo_id}, update_data)
 
             if result.modified_count > 0:
                 messagebox.showinfo("Success", f"Property details updated successfully.", parent=self.root)
-                # Refresh the list to show updated values
-                self.settings_tab._load_properties_into_list()
-                # Refresh property comboboxes on other tabs? Might be needed if names change.
-                self._refresh_property_comboboxes() # Call helper to update comboboxes
+                # Refresh the stored property document
+                self.assigned_property_doc = property_col.find_one({"_id": prop_mongo_id})
+                # Reload details in settings tab
+                self._load_assigned_property_details(self.settings_tab)
+                # Refresh slots display on Entry/Exit tabs
+                if hasattr(self, 'entry_tab') and self.entry_tab.winfo_exists():
+                    self.entry_tab._refresh_slots()
+                if hasattr(self, 'exit_tab') and self.exit_tab.winfo_exists():
+                    self.exit_tab._refresh_slots()
+
             elif result.matched_count > 0:
                 messagebox.showinfo("No Changes", "No changes were detected in the provided details.", parent=self.root)
             else:
-                # This shouldn't happen if _selected_prop_id is valid
-                messagebox.showerror("Save Error", "Could not find the selected property in the database to update.", parent=self.root)
+                 # This shouldn't happen if _selected_prop_id is valid
+                 messagebox.showerror("Save Error", "Could not find the assigned property in the database to update.", parent=self.root)
         except pymongo.errors.PyMongoError as e:
              messagebox.showerror("Database Error", f"Failed to save property details to database:\n{e}", parent=self.root)
              print(f"[ERROR] Saving property details: {e}")
         except Exception as e:
             messagebox.showerror("Unexpected Error", f"An unexpected error occurred while saving: {e}", parent=self.root)
             print(f"[ERROR] Unexpected error saving property: {e}")
+            traceback.print_exc()
+
 
     def _refresh_property_comboboxes(self):
-        """Refreshes the property selection comboboxes on Entry and Exit tabs."""
-        print("[INFO] Refreshing property comboboxes...")
+        """Refreshes the property selection comboboxes on Entry and Exit tabs. (Now just sets the assigned property)."""
+        print("[INFO] Refreshing property display...")
+        # Check if main UI components exist before proceeding
+        if not hasattr(self, 'entry_tab') or not self.entry_tab.winfo_exists() or not self.assigned_property_doc:
+            print("[WARN] Main UI or assigned property not ready for property display refresh.")
+            return # Main UI not built yet or property not assigned
+
+        assigned_prop_name = self.assigned_property_doc.get('name', 'Error')
+
         try:
-            props = list(property_col.find({}, {"name": 1}).sort("name", 1))
-            names = [p['name'] for p in props if 'name' in p]
-            property_available = bool(names)
-
             for tab in (self.entry_tab, self.exit_tab):
-                # Find the specific Combobox widget associated with the property selection
-                # This requires knowing the widget hierarchy or storing a direct reference
-                prop_combo = None
-                try:
-                    # Attempt to find the combobox through the known hierarchy
-                    # Note: This relies on the structure defined in _build_tab and might break if changed
-                    # Assumes left_frame is the first child of the tab frame, prop_frame is the first child of left_frame,
-                    # and the combobox is the second child of prop_frame.
-                    left_frame_widget = tab.winfo_children()[0] # Assuming left_frame is first
-                    prop_frame_widget = left_frame_widget.winfo_children()[0] # Assuming prop_frame is first in left_frame
-                    prop_combo = prop_frame_widget.winfo_children()[1] # Assuming combobox is second in prop_frame (!label, !combobox)
-                    if not isinstance(prop_combo, ttk.Combobox):
-                        print(f"[WARN] Found widget is not a Combobox: {prop_combo}")
-                        prop_combo = None # Reset if it's not the right widget type
-                except (IndexError, AttributeError) as find_e:
-                    print(f"[WARN] Could not find property combobox widget for tab {tab} via hierarchy: {find_e}")
-                    # Fallback: If you stored a direct reference like `tab._prop_combo = cbp` in _build_tab, use that:
-                    # if hasattr(tab, '_prop_combo'):
-                    #     prop_combo = tab._prop_combo
+                 # Find the specific display widget (Entry or Label)
+                 prop_display_widget = None
+                 try:
+                     left_frame_widget = tab.winfo_children()[0]
+                     prop_frame_widget = left_frame_widget.winfo_children()[0]
+                     prop_display_widget = prop_frame_widget.winfo_children()[1] # Assuming Entry/Label is second
+                 except (IndexError, AttributeError, tk.TclError) as find_e:
+                     print(f"[WARN] Could not find property display widget for tab {tab} via hierarchy: {find_e}")
+                     continue # Skip to next tab if widget not found
 
-                if hasattr(tab, '_prop_var') and prop_combo:
-                    prop_var = tab._prop_var
-                    current_selection = prop_var.get()
-
-                    prop_combo['values'] = names
-                    if property_available:
-                        prop_combo.config(state="readonly")
-                        # Try to keep selection if it still exists, else select first
-                        if current_selection in names:
-                            prop_var.set(current_selection)
-                        else:
-                            prop_var.set(names[0])
-                        if hasattr(tab, '_refresh_slots') and callable(tab._refresh_slots):
-                            tab._refresh_slots() # Refresh slots based on new selection/list
-                    elif names == ["DB Error"]: # Should not happen if DB was ok before
-                        prop_var.set("DB Error")
-                        prop_combo.config(state="disabled")
-                    else:
-                        prop_var.set("No Properties Found")
-                        prop_combo.config(state="disabled")
-                        if hasattr(tab, '_refresh_slots') and callable(tab._refresh_slots):
-                            tab._refresh_slots() # Refresh slots (will show N/A)
-                elif not prop_combo:
-                    print(f"[WARN] Property combobox widget reference missing for tab {tab}")
-
+                 if hasattr(tab, '_prop_var') and prop_display_widget:
+                     tab._prop_var.set(assigned_prop_name) # Set the variable
+                     # Ensure widget state is readonly/disabled if it's an Entry
+                     if isinstance(prop_display_widget, ttk.Entry):
+                         prop_display_widget.config(state="readonly")
+                     # Refresh slots based on the (potentially updated) assigned property doc
+                     if hasattr(tab, '_refresh_slots') and callable(tab._refresh_slots):
+                         tab._refresh_slots()
+                 else:
+                      print(f"[WARN] Property variable or display widget missing for tab {tab}")
 
         except Exception as e:
-            print(f"[ERROR] Failed to refresh property comboboxes: {e}")
-            messagebox.showerror("UI Error", f"Failed to update property lists: {e}", parent=self.root)
+            print(f"[ERROR] Failed to refresh property display: {e}")
+            messagebox.showerror("UI Error", f"Failed to update property display: {e}", parent=self.root)
 
 
     # --- Capture/Save Logic ---
     def _capture_and_edit(self, tab_frame, is_entry, append_log_func, prop_name, vehicle_type, refresh_slots, btn_capture, btn_manual):
         """Captures frame, runs OCR, shows edit dialog, and calls save on confirm."""
         ## ANALYSIS: Orchestrates the capture->OCR->confirm->save workflow.
-        ## ANALYSIS: Handles button state changes during the process.
-        ## ANALYSIS: Potential GUI freeze during cv2.imwrite and detect_text. Consider threading.
-        if not prop_name or prop_name == "No Properties Found" or prop_name == "DB Error":
-            messagebox.showwarning("Property Required", "Please select a valid property first.", parent=self.root)
+        ## ANALYSIS: Uses assigned property name.
+        if not self.assigned_property_doc: # Check if property is loaded
+            messagebox.showwarning("Property Error", "Assigned property details not loaded.", parent=self.root)
             return
+
+        # Use the name from the loaded document for consistency
+        assigned_prop_name = self.assigned_property_doc.get('name', 'Error')
 
         original_capture_text = btn_capture['text'] # Store original text
         btn_capture.config(state="disabled", text="⏳ Capturing...")
@@ -1336,7 +1448,7 @@ class ParkingApp:
             messagebox.showwarning("No Camera", "Camera is not running or not selected.", parent=self.root)
             # Restore button states
             btn_capture.config(state="normal" if AVAILABLE_CAMERAS else "disabled", text=original_capture_text) # Re-enable only if cameras exist
-            btn_manual.config(state="normal" if prop_name and prop_name != "No Properties Found" else "disabled")
+            btn_manual.config(state="normal" if self.assigned_property_doc else "disabled")
             # Attempt to restart camera if it stopped unexpectedly
             if hasattr(tab_frame, 'start_camera'):
                  print("[INFO] Attempting to restart camera...")
@@ -1357,13 +1469,13 @@ class ParkingApp:
                 messagebox.showerror("Capture Error", f"Failed to capture frame (OpenCV error):\n{e}", parent=self.root)
                 append_log_func(f"OpenCV capture error: {e}", "ERROR")
                 btn_capture.config(state="normal", text=original_capture_text) # Restore state
-                btn_manual.config(state="normal" if prop_name and prop_name != "No Properties Found" else "disabled")
+                btn_manual.config(state="normal" if self.assigned_property_doc else "disabled")
                 return
             except Exception as e:
                 messagebox.showerror("Capture Error", f"Failed to capture frame:\n{e}", parent=self.root)
                 append_log_func(f"Capture error: {e}", "ERROR")
                 btn_capture.config(state="normal", text=original_capture_text) # Restore state
-                btn_manual.config(state="normal" if prop_name and prop_name != "No Properties Found" else "disabled")
+                btn_manual.config(state="normal" if self.assigned_property_doc else "disabled")
                 return
 
         # Save the captured frame to a temporary file for OCR
@@ -1374,7 +1486,6 @@ class ParkingApp:
             filename = f"capture_{timestamp}_{uuid.uuid4().hex[:6]}.jpg" # Unique filename
             path = os.path.join(ASSETS_DIR, filename)
 
-            # ## ANALYSIS: cv2.imwrite can block the GUI. Consider threading.
             success = cv2.imwrite(path, captured_frame, [cv2.IMWRITE_JPEG_QUALITY, 95]) # Save with decent quality
             if not success:
                 raise IOError(f"Failed to save image file: {path}")
@@ -1386,19 +1497,17 @@ class ParkingApp:
             messagebox.showerror("File Save Error", f"Failed to save captured image:\n{e}", parent=self.root)
             append_log_func(f"Image save error: {e}", "ERROR")
             btn_capture.config(state="normal", text=original_capture_text) # Restore state
-            btn_manual.config(state="normal" if prop_name and prop_name != "No Properties Found" else "disabled")
+            btn_manual.config(state="normal" if self.assigned_property_doc else "disabled")
             if path and os.path.exists(path): # Clean up failed save attempt
                  try: os.remove(path)
                  except Exception as del_e: print(f"[ERROR] Cleanup failed save {path}: {del_e}")
             return
 
         # --- Perform OCR ---
-        # ## ANALYSIS: detect_text involves network I/O and can block the GUI. Needs threading.
         plate = detect_text(path)
         append_log_func(f"OCR Result: '{plate}'" if plate and not plate.startswith("OCR Failed") else f"OCR Result: {plate if plate else 'No plate detected'}", "OCR")
 
         # --- Show Confirmation Dialog ---
-        # Define callbacks for the dialog
         def on_confirm_callback(edited_plate):
             append_log_func(f"Plate Confirmed/Edited: {edited_plate}", "INFO")
             try:
@@ -1406,50 +1515,44 @@ class ParkingApp:
                 self.root.update_idletasks()
             except tk.TclError: pass # Ignore if button destroyed
 
-            # Call the save function with the confirmed plate
-            # Pass the log date variable from the tab frame
             log_date_to_refresh = tab_frame._log_date_var.get() if hasattr(tab_frame, '_log_date_var') else None
-            self._save_record(edited_plate, is_entry, append_log_func, prop_name, vehicle_type, refresh_slots, log_date_to_refresh)
-            # Note: Button state is reset within the dialog's destroy binding now
+            # Use assigned_prop_name here
+            self._save_record(edited_plate, is_entry, append_log_func, assigned_prop_name, vehicle_type, refresh_slots, log_date_to_refresh)
 
         def on_retake_callback():
             append_log_func("Retake/Cancel requested.", "INFO")
-            # Button state is reset within the dialog's destroy binding
+
 
         try:
-            # Create and show the modal dialog
             dialog = EditableDialog(self.root, path, plate, on_confirm_callback, on_retake_callback)
-            # Bind the button state restoration to the dialog's destruction
-            # This ensures buttons are re-enabled *after* the dialog closes, regardless of how
             dialog.bind("<Destroy>", lambda e, b_cap=btn_capture, b_man=btn_manual, txt=original_capture_text: (
                 b_cap.config(state="normal" if tab_frame._state.get('cap') and tab_frame._state['cap'].isOpened() else "disabled", text=txt if tab_frame._state.get('cap') and tab_frame._state['cap'].isOpened() else "🚫 Camera Stopped"),
-                b_man.config(state="normal" if tab_frame._prop_var.get() and tab_frame._prop_var.get() != "No Properties Found" and tab_frame._prop_var.get() != "DB Error" else "disabled")
-            ), add="+") # Use add="+" to not overwrite the internal cleanup binding
+                b_man.config(state="normal" if self.assigned_property_doc else "disabled") # Check assigned_property_doc
+            ), add="+")
 
         except Exception as e:
             messagebox.showerror("Dialog Error", f"Failed to open confirmation dialog:\n{e}", parent=self.root)
             append_log_func(f"Dialog creation error: {e}", "ERROR")
-            # Restore button states if dialog fails to open
             try:
                 btn_capture.config(state="normal", text=original_capture_text)
-                btn_manual.config(state="normal" if prop_name and prop_name != "No Properties Found" else "disabled")
-            except tk.TclError: pass # Ignore if buttons destroyed
-            # Clean up the image file if the dialog failed
+                btn_manual.config(state="normal" if self.assigned_property_doc else "disabled")
+            except tk.TclError: pass
             if path and os.path.exists(path):
                 try: os.remove(path)
                 except Exception as del_e: print(f"[ERROR] Cleanup dialog fail {path}: {del_e}")
 
-        # Note: The temporary image file deletion is now handled within the EditableDialog's _handle_destroy method.
 
     def _manual_entry_exit(self, tab_frame, is_entry, append_log_func, prop_name, vehicle_type, refresh_slots, btn_capture, btn_manual):
         """Handles manual entry/exit via a simple dialog, then calls save."""
-        ## ANALYSIS: Provides a way to record entries/exits without using the camera/OCR.
-        if not prop_name or prop_name == "No Properties Found" or prop_name == "DB Error":
-            messagebox.showwarning("Property Required", "Please select a valid property first.", parent=self.root)
+        ## ANALYSIS: Uses assigned property name.
+        if not self.assigned_property_doc: # Check if property is loaded
+            messagebox.showwarning("Property Error", "Assigned property details not loaded.", parent=self.root)
             return
 
+        # Use the name from the loaded document for consistency
+        assigned_prop_name = self.assigned_property_doc.get('name', 'Error')
+
         section = "Entry" if is_entry else "Exit"
-        # Use simpledialog for basic text input
         plate = simpledialog.askstring("Manual Input", f"Enter Number Plate for Manual {section} ({vehicle_type}):", parent=self.root)
 
         if not plate: # User cancelled or entered nothing
@@ -1458,7 +1561,6 @@ class ParkingApp:
 
         plate = plate.strip().upper() # Clean and standardize input
 
-        # Basic validation (same as in EditableDialog)
         if not re.fullmatch(r'[A-Z0-9\-]{6,13}', plate):
             messagebox.showwarning("Invalid Format", "Plate format seems incorrect.\nExpected: 6-13 Alphanumeric characters or Hyphens.", parent=self.root)
             append_log_func(f"Manual input validation failed: '{plate}'", "WARN")
@@ -1466,7 +1568,6 @@ class ParkingApp:
 
         append_log_func(f"Manual Plate Entered: {plate} ({vehicle_type}) for {section}", "INFO")
 
-        # Update button states before saving
         original_manual_text = btn_manual['text']
         try:
             btn_manual.config(state="disabled", text="⏳ Saving...")
@@ -1475,42 +1576,44 @@ class ParkingApp:
         except tk.TclError: pass # Ignore if buttons destroyed
 
         try:
-            # Call the same save function
-            # Pass the log date variable from the tab frame
             log_date_to_refresh = tab_frame._log_date_var.get() if hasattr(tab_frame, '_log_date_var') else None
-            self._save_record(plate, is_entry, append_log_func, prop_name, vehicle_type, refresh_slots, log_date_to_refresh)
+            # Use assigned_prop_name here
+            self._save_record(plate, is_entry, append_log_func, assigned_prop_name, vehicle_type, refresh_slots, log_date_to_refresh)
         finally:
             # Restore button states after save attempt (success or failure)
             try:
                 btn_manual.config(state="normal", text=original_manual_text)
-                # Check camera status before re-enabling capture button
                 is_cam_running = tab_frame._state.get('cap') and tab_frame._state['cap'].isOpened()
                 capture_button_state = "normal" if is_cam_running else "disabled"
                 capture_button_text = "📸 Capture & Process" if is_cam_running else "🚫 Camera Stopped"
-                # Ensure tab_frame has _prop_var before accessing it (should always exist here)
-                if hasattr(tab_frame, '_prop_var'):
-                     # Also check property selection status
-                     if not tab_frame._prop_var.get() or tab_frame._prop_var.get() == "No Properties Found" or tab_frame._prop_var.get() == "DB Error":
-                          capture_button_state = "disabled"
-                          capture_button_text = "🚫 Select Property" if is_cam_running else capture_button_text # Keep camera status text if no prop
+                if not self.assigned_property_doc: # Check assigned property again
+                     capture_button_state = "disabled"
+                     capture_button_text = "🚫 Property Error" if is_cam_running else capture_button_text
 
-                     btn_capture.config(state=capture_button_state, text=capture_button_text)
-                else:
-                     # Fallback if _prop_var is missing somehow
-                     btn_capture.config(state="disabled", text=capture_button_text)
+                btn_capture.config(state=capture_button_state, text=capture_button_text)
             except tk.TclError: pass # Ignore if buttons destroyed
 
 
     def _save_record(self, plate, is_entry, append_log_func, prop_name, vehicle_type, refresh_slots_func, log_date_to_refresh=None):
         """Saves entry/exit record to DB, updates slots, calculates fee on exit, and refreshes log for the specified date."""
-        ## ANALYSIS: Handles core DB logic for parking entries/exits.
-        ## ANALYSIS: Calculates fees based on duration (first hour free). Updates property slots.
-        ## ANALYSIS: DB operations can block GUI. Consider threading.
-        ## ANALYSIS: Refreshes the relevant log display for the specified date after successful save.
+        ## ANALYSIS: Uses the assigned property document fetched during login.
         now = datetime.now()
         v_type_lower = vehicle_type.lower() # Use lowercase for consistency in DB keys
         action = "entry" if is_entry else "exit"
         append_log_func(f"Attempting to save {action} for {plate} ({vehicle_type})...", "SAVE")
+
+        if not self.assigned_property_doc:
+             messagebox.showerror("Save Error", "Assigned property data is missing. Cannot save record.", parent=self.root)
+             append_log_func("Save failed: Missing assigned property document.", "ERROR")
+             return
+
+        # Use the stored property document
+        prop = self.assigned_property_doc
+        pid = prop.get('_id') # Get the MongoDB ObjectId
+        if not pid:
+            messagebox.showerror("Save Error", "Assigned property ID is missing. Cannot save record.", parent=self.root)
+            append_log_func("Save failed: Missing assigned property _id.", "ERROR")
+            return
 
         # Final validation check on the plate format before DB operation
         if not re.fullmatch(r'[A-Z0-9\-]+', plate): # Simplified check, main validation done earlier
@@ -1519,30 +1622,20 @@ class ParkingApp:
             return
 
         try:
-            # Find the property details (including ID and fee info)
-            prop = property_col.find_one({"name": prop_name})
-            if not prop:
-                messagebox.showerror("Property Error", f"Property '{prop_name}' not found in database.", parent=self.root)
-                append_log_func(f"Save failed: Property '{prop_name}' not found.", "ERROR")
-                return
-            pid = prop['_id'] # Get the property's MongoDB ObjectId
             avail_space_key = f"available_parking_spaces_{v_type_lower}"
             total_space_key = f"parking_spaces_{v_type_lower}"
             fee_key = f"fee_per_hour_{v_type_lower}"
 
             if is_entry:
                 # --- Handle Vehicle Entry ---
-                # Check if vehicle already has an active session at this property
                 existing_entry = parking_col.find_one({"vehicle_no": plate, "property_id": pid, "exit_time": None})
                 if existing_entry:
                     messagebox.showwarning("Duplicate Entry", f"Vehicle {plate} already has an active parking session at {prop_name}.", parent=self.root)
                     append_log_func(f"Duplicate entry prevented: {plate} at {prop_name}.", "WARN")
                     return
 
-                # Check available space *again* right before inserting (atomic check preferred but harder)
-                # This uses the potentially slightly stale 'prop' data fetched earlier.
-                # For higher accuracy, could re-fetch just the count or use atomic decrement with check.
-                latest_prop = property_col.find_one({"_id": pid}, {avail_space_key: 1}) # Get latest count
+                # Re-fetch latest property details just before update for accurate counts
+                latest_prop = property_col.find_one({"_id": pid}, {avail_space_key: 1})
                 if not latest_prop or latest_prop.get(avail_space_key, 0) <= 0:
                     messagebox.showwarning("Parking Full", f"No {vehicle_type} slots currently available at {prop_name}.", parent=self.root)
                     append_log_func(f"Entry failed: Parking full ({vehicle_type}) for {plate} at {prop_name}.", "WARN")
@@ -1550,78 +1643,72 @@ class ParkingApp:
 
                 # Create new parking record
                 new_record = {
-                    "parking_id": str(uuid.uuid4()), # Unique ID for this parking event
+                    "parking_id": str(uuid.uuid4()),
                     "property_id": pid,
                     "vehicle_no": plate,
-                    "vehicle_type": vehicle_type, # Store Car/Bike as selected
+                    "vehicle_type": vehicle_type,
                     "entry_time": now,
-                    "exit_time": None, # Mark as active
-                    "fee": 0, # Fee calculated on exit
-                    "mode_of_payment": None # To be updated later if needed
+                    "exit_time": None,
+                    "fee": 0,
+                    "mode_of_payment": None
                 }
                 insert_result = parking_col.insert_one(new_record)
 
                 # Decrement available space count for the property
                 update_result = property_col.update_one(
-                    {"_id": pid, avail_space_key: {"$gt": 0}}, # Ensure space count > 0 before decrementing
+                    {"_id": pid, avail_space_key: {"$gt": 0}},
                     {"$inc": {avail_space_key: -1}}
                 )
 
                 if insert_result.inserted_id and update_result.modified_count > 0:
-                    # Log to console only
                     append_log_func(f"Entry Saved: {plate} ({vehicle_type}) @ {now:%Y-%m-%d %H:%M:%S}", "SAVE")
                     messagebox.showinfo("Entry Success", f"{vehicle_type} {plate} entry recorded successfully at {prop_name}.", parent=self.root)
-                    # Refresh the visual log display for the specified date
+                    # Refresh the stored property doc after update
+                    self.assigned_property_doc = property_col.find_one({"_id": pid})
                     self._load_logs(self.entry_tab._log_widget, True, log_date_to_refresh)
                 elif insert_result.inserted_id:
                      append_log_func(f"Entry saved for {plate}, but slot count update failed (maybe already 0?).", "WARN")
                      messagebox.showwarning("DB Warning", "Entry recorded, but failed to update slot count. Please check property details.", parent=self.root)
-                     self._load_logs(self.entry_tab._log_widget, True, log_date_to_refresh) # Still refresh log
+                     self.assigned_property_doc = property_col.find_one({"_id": pid}) # Refresh anyway
+                     self._load_logs(self.entry_tab._log_widget, True, log_date_to_refresh)
                 else:
                      append_log_func(f"Entry DB insert issue for {plate}.", "ERROR")
                      messagebox.showerror("DB Error", "Failed to save entry record to database.", parent=self.root)
 
             else:
                 # --- Handle Vehicle Exit ---
-                # Find the latest active session for this vehicle at this property and update exit time
                 updated_doc = parking_col.find_one_and_update(
-                    {"vehicle_no": plate, "exit_time": None, "property_id": pid}, # Match active session
+                    {"vehicle_no": plate, "exit_time": None, "property_id": pid},
                     {"$set": {"exit_time": now}},
-                    sort=[('entry_time', -1)], # Get the latest entry if multiple somehow exist
-                    return_document=pymongo.ReturnDocument.AFTER # Get the document *after* update
+                    sort=[('entry_time', -1)],
+                    return_document=pymongo.ReturnDocument.AFTER
                 )
 
                 if updated_doc:
                     entry_time = updated_doc.get('entry_time')
                     calculated_fee = 0.0
-                    # Use vehicle type from the record being exited, not the current selection
                     exiting_vehicle_type = updated_doc.get('vehicle_type', 'Unknown')
                     exiting_v_type_lower = exiting_vehicle_type.lower()
                     exit_fee_key = f"fee_per_hour_{exiting_v_type_lower}"
                     exit_avail_space_key = f"available_parking_spaces_{exiting_v_type_lower}"
 
-                    # Calculate fee if entry time is valid
                     if entry_time and isinstance(entry_time, datetime):
                         duration = now - entry_time
                         total_hours = duration.total_seconds() / 3600
-                        fee_per_hour = prop.get(exit_fee_key, 10.0) # Get fee for the correct vehicle type, default 10
+                        # Use fee from the stored property doc
+                        fee_per_hour = prop.get(exit_fee_key, 10.0)
 
-                        # Validate fee_per_hour from DB
                         if not isinstance(fee_per_hour, (int, float)) or fee_per_hour < 0:
                             print(f"[WARN] Invalid {exit_fee_key} ({fee_per_hour}) in DB for {prop_name}. Using default 10.0.")
-                            fee_per_hour = 10.0 # Use default if DB value is invalid
+                            fee_per_hour = 10.0
 
-                        # Fee Logic: First hour free, then charge for each full hour started *after* the first.
                         if total_hours <= 1.0:
-                            calculated_fee = 0.0 # First hour is free
+                            calculated_fee = 0.0
                         else:
-                            # Ceil rounds up to the nearest whole hour. Subtract 1 for the free hour.
                             chargeable_hours = math.ceil(total_hours) - 1
                             calculated_fee = chargeable_hours * fee_per_hour
 
-                        calculated_fee = round(max(0.0, calculated_fee), 2) # Ensure fee is not negative, round to 2 decimal places
-
-                        # Update the record with the calculated fee
+                        calculated_fee = round(max(0.0, calculated_fee), 2)
                         parking_col.update_one({"_id": updated_doc["_id"]}, {"$set": {"fee": calculated_fee}})
                         append_log_func(f"Fee Calculated: ₹{calculated_fee:.2f} ({total_hours:.2f} hrs).", "INFO")
                     else:
@@ -1632,12 +1719,12 @@ class ParkingApp:
                     property_col.update_one({"_id": pid}, {"$inc": {exit_avail_space_key: 1}})
 
                     log_msg = f"Exit Saved: {plate} ({exiting_vehicle_type}) Fee: ₹{calculated_fee:.2f} @ {now:%Y-%m-%d %H:%M:%S}"
-                    append_log_func(log_msg, "SAVE") # Log to console
+                    append_log_func(log_msg, "SAVE")
                     messagebox.showinfo("Exit Success", f"Exit recorded for {plate} from {prop_name}.\nCalculated Fee: ₹{calculated_fee:.2f}", parent=self.root)
-                    # Refresh the visual log display for the specified date
+                    # Refresh the stored property doc after update
+                    self.assigned_property_doc = property_col.find_one({"_id": pid})
                     self._load_logs(self.exit_tab._log_widget, False, log_date_to_refresh)
                 else:
-                    # No active session found to update
                     messagebox.showwarning("No Entry Found", f"No active parking session found for {plate} at {prop_name}.", parent=self.root)
                     append_log_func(f"Exit failed: No open entry found for {plate} at {prop_name}.", "WARN")
 
@@ -1667,10 +1754,19 @@ class ParkingApp:
 
 
     def _load_logs(self, log_widget, is_entry, selected_date_str=None):
-        """Loads parking records for a specific date into the specified log display."""
-        ## ANALYSIS: Fetches records from DB for a given date and populates the ScrolledText widget.
-        ## ANALYSIS: Clears previous logs on each load. Handles date parsing.
+        """Loads parking records for a specific date and the assigned property into the specified log display."""
+        ## ANALYSIS: Fetches records from DB for a given date/property and populates the ScrolledText widget.
         section = "Entry" if is_entry else "Exit"
+
+        if not self.assigned_property_doc:
+             print("[WARN] Cannot load logs, assigned property not set.")
+             log_widget.config(state=tk.NORMAL)
+             log_widget.delete('1.0', tk.END)
+             log_widget.insert("end", "Error: Property not assigned.\n")
+             log_widget.config(state=tk.DISABLED)
+             return
+
+        assigned_prop_mongo_id = self.assigned_property_doc.get('_id') # Get MongoDB _id
 
         # Parse the selected date
         if selected_date_str is None:
@@ -1678,14 +1774,11 @@ class ParkingApp:
 
         try:
             selected_date = datetime.strptime(selected_date_str, "%Y-%m-%d")
-            # Use datetime.combine and the imported time class (from datetime import time)
-            # This should now work correctly because 'time' refers to the class
             start_of_day = datetime.combine(selected_date.date(), time.min)
             end_of_day = datetime.combine(selected_date.date(), time.max)
             date_header = selected_date.strftime("%Y-%m-%d") # For the log title
         except ValueError:
             messagebox.showerror("Invalid Date", f"Invalid date format: '{selected_date_str}'. Please use YYYY-MM-DD.", parent=self.root)
-            # Optionally clear the log or show an error message in it
             log_widget.config(state=tk.NORMAL)
             log_widget.delete('1.0', tk.END)
             log_widget.insert("end", f"Invalid date format entered: {selected_date_str}\n")
@@ -1698,28 +1791,26 @@ class ParkingApp:
         log_widget.insert("end", f"📄 {section} Log for: {date_header}\n" + "="*40 + "\n") # Header with date
         log_widget.config(state=tk.DISABLED)
 
-        print(f"[INFO] Loading {section.lower()} logs for display date: {date_header}...") # Console log
+        print(f"[INFO] Loading {section.lower()} logs for property '{self.assigned_property_doc.get('name')}' on date: {date_header}...") # Console log
 
         try:
-            # Define query based on whether it's entry or exit and the date range
+            # Define query based on entry/exit, date range, AND property_id
             if is_entry:
-                # Find entries *on* this day that are still active (no exit time)
                 query = {
+                    "property_id": assigned_prop_mongo_id, # Filter by assigned property
                     "entry_time": {"$gte": start_of_day, "$lte": end_of_day},
                     "exit_time": None
                 }
-                sort_key = "entry_time" # Sort entries by entry time
+                sort_key = "entry_time"
             else:
-                # Find exits *on* this day
                 query = {
+                    "property_id": assigned_prop_mongo_id, # Filter by assigned property
                     "exit_time": {"$gte": start_of_day, "$lte": end_of_day}
                 }
-                sort_key = "exit_time" # Sort exits by exit time
+                sort_key = "exit_time"
 
-            # Fetch records matching the criteria for the selected day
             records_cursor = parking_col.find(query).sort(sort_key, pymongo.DESCENDING)
-
-            records_list = list(records_cursor) # Execute query and get list
+            records_list = list(records_cursor)
 
             if not records_list:
                 log_widget.config(state=tk.NORMAL)
@@ -1728,36 +1819,29 @@ class ParkingApp:
                 print(f"[INFO] No {section.lower()} records found in DB for {date_header}.")
             else:
                 log_lines = []
-                for record in records_list: # Iterate through the fetched list
+                for record in records_list:
                     ts_key = "entry_time" if is_entry else "exit_time"
-                    ts = record.get(ts_key) # Get the relevant timestamp
+                    ts = record.get(ts_key)
 
                     if ts and isinstance(ts, datetime):
-                        icon = "🟢" if is_entry else "🔴" # Green for entry, Red for exit
+                        icon = "🟢" if is_entry else "🔴"
                         plate = record.get('vehicle_no', 'N/A')
                         v_type = record.get('vehicle_type', '')
-                        # Format timestamp consistently (only time needed as date is in header)
                         time_str = ts.strftime('%H:%M:%S')
                         type_str = f" ({v_type})" if v_type else ""
+                        log_line = f"{time_str} {icon} {plate:<14}{type_str:<7}"
 
-                        # Format the log line with padding for alignment
-                        log_line = f"{time_str} {icon} {plate:<14}{type_str:<7}" # Pad plate and type
-
-                        # Add fee for exit records
                         if not is_entry:
                             fee = record.get('fee', None)
                             fee_str = f"₹{fee:.2f}" if isinstance(fee, (int, float)) else "N/A"
                             log_line += f" (Fee: {fee_str})"
-
                         log_lines.append(log_line + "\n")
                     else:
-                        # Handle records with missing/invalid timestamps if necessary
                         log_lines.append(f"Invalid record timestamp: ID {record.get('_id')}\n")
-
 
                 if log_lines:
                     log_widget.config(state=tk.NORMAL)
-                    log_widget.insert(tk.END, "".join(log_lines)) # Insert all lines at once
+                    log_widget.insert(tk.END, "".join(log_lines))
                     log_widget.config(state=tk.DISABLED)
                 print(f"[INFO] Displayed {len(log_lines)} {section.lower()} log entries for {date_header}.")
 
@@ -1772,20 +1856,21 @@ class ParkingApp:
             log_widget.config(state=tk.NORMAL); log_widget.insert(tk.END, "Error loading logs\n"); log_widget.config(state=tk.DISABLED)
 
     def _export_records_date_range(self):
-        """Exports parking records within a selected date range to CSV."""
-        ## ANALYSIS: Exports data to CSV based on user-selected date range. Includes header row.
+        """Exports parking records for the assigned property within a selected date range to CSV."""
+        ## ANALYSIS: Exports data to CSV based on assigned property and date range.
+        if not self.assigned_property_doc:
+             messagebox.showerror("Error", "Cannot export records, assigned property not loaded.", parent=self.root)
+             return
+
+        assigned_prop_mongo_id = self.assigned_property_doc.get('_id') # Get MongoDB _id
+        assigned_prop_name = self.assigned_property_doc.get('name', 'UnknownProperty')
+
         try:
             start_date_str = self.settings_tab._export_start_date_var.get()
             end_date_str = self.settings_tab._export_end_date_var.get()
-            # Parse date strings into datetime objects (start of the day)
             start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
             end_date_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
-
-            # To include records *on* the end date, query up to the end of that day
-            # Use datetime.combine and the imported time class (from datetime import time)
-            # This should now work correctly because 'time' refers to the class
             end_date_exclusive = datetime.combine(end_date_dt, time.max)
-
         except ValueError:
             messagebox.showerror("Invalid Date", "Please enter dates in YYYY-MM-DD format.", parent=self.root)
             return
@@ -1794,9 +1879,8 @@ class ParkingApp:
             messagebox.showerror("Invalid Date Range", "Start date must be before or the same as the end date.", parent=self.root)
             return
 
-        # Suggest a filename
-        default_filename = f"parking_report_{start_date_str}_to_{end_date_str}.csv"
-        # Ask user where to save the file
+        # Suggest a filename including property name
+        default_filename = f"parking_report_{assigned_prop_name.replace(' ','_')}_{start_date_str}_to_{end_date_str}.csv"
         path = filedialog.asksaveasfilename(
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
@@ -1804,29 +1888,26 @@ class ParkingApp:
             initialfile=default_filename,
             parent=self.root
         )
-        if not path: # User cancelled save dialog
-            return
+        if not path: return
 
-        print(f"[INFO] Exporting records from {start_date_str} to {end_date_str} to {path}")
+        print(f"[INFO] Exporting records for property '{assigned_prop_name}' from {start_date_str} to {end_date_str} to {path}")
         try:
-            # Query MongoDB for records within the date range (inclusive)
-            # Query based on entry_time being within the range
+            # Query MongoDB for records for the assigned property within the date range
             query = {
+                "property_id": assigned_prop_mongo_id, # Filter by assigned property
                 "entry_time": {
-                    "$gte": start_date,         # Greater than or equal to start date (00:00:00)
-                    "$lte": end_date_exclusive  # Less than or equal to end date (23:59:59.999999)
+                    "$gte": start_date,
+                    "$lte": end_date_exclusive
                 }
             }
-            records_cursor = parking_col.find(query).sort("entry_time", pymongo.ASCENDING) # Sort chronologically
+            records_cursor = parking_col.find(query).sort("entry_time", pymongo.ASCENDING)
 
             count = 0
             with open(path, 'w', newline='', encoding='utf-8') as f:
                 writer = csv.writer(f)
-                # Write header row
-                header = ["Plate", "Vehicle Type", "Entry Time", "Exit Time", "Fee (₹)", "Property ID", "Parking ID"]
+                header = ["Plate", "Vehicle Type", "Entry Time", "Exit Time", "Fee (₹)", "Property Name", "Parking ID"] # Changed Property ID header
                 writer.writerow(header)
 
-                # Write data rows
                 for record in records_cursor:
                     entry_ts = record.get('entry_time')
                     exit_ts = record.get('exit_time')
@@ -1836,9 +1917,9 @@ class ParkingApp:
                         record.get('vehicle_no', 'N/A'),
                         record.get('vehicle_type', ''),
                         entry_ts.strftime('%Y-%m-%d %H:%M:%S') if entry_ts else '',
-                        exit_ts.strftime('%Y-%m-%d %H:%M:%S') if exit_ts else 'PARKED', # Indicate if still parked
-                        f"{fee:.2f}" if isinstance(fee, (int, float)) else '', # Format fee
-                        str(record.get('property_id', '')), # Convert ObjectId to string
+                        exit_ts.strftime('%Y-%m-%d %H:%M:%S') if exit_ts else 'PARKED',
+                        f"{fee:.2f}" if isinstance(fee, (int, float)) else '',
+                        assigned_prop_name, # Write property name instead of ID
                         record.get('parking_id', '')
                     ])
                     count += 1
@@ -1847,8 +1928,8 @@ class ParkingApp:
                 messagebox.showinfo("Export Success", f"Successfully exported {count} records to:\n{path}", parent=self.root)
                 print(f"[INFO] Exported {count} records.")
             else:
-                messagebox.showinfo("Export Info", f"No parking records found between {start_date_str} and {end_date_str}.", parent=self.root)
-                print(f"[INFO] No records found for export in the specified date range.")
+                messagebox.showinfo("Export Info", f"No parking records found for property '{assigned_prop_name}' between {start_date_str} and {end_date_str}.", parent=self.root)
+                print(f"[INFO] No records found for export in the specified date range/property.")
 
         except pymongo.errors.PyMongoError as e:
             messagebox.showerror("Database Error", f"Failed to query records for export:\n{e}", parent=self.root)
@@ -1864,12 +1945,11 @@ class ParkingApp:
 # --- Main Execution ---
 if __name__ == "__main__":
     # Crucial check: Ensure DB connection was successful before starting GUI
-    if db is None or client is None or parking_col is None or property_col is None:
+    if db is None or client is None or parking_col is None or property_col is None or user_col is None or employee_col is None:
          print("[FATAL] Exiting: Database connection or collection initialization failed.")
-         # Attempt to show a simple Tk error message if possible
          try:
              root_err = tk.Tk(); root_err.withdraw()
-             messagebox.showerror("Startup Error", "Database connection failed. Cannot start application.\nPlease check config.ini and network connection.")
+             messagebox.showerror("Startup Error", "Database connection or collection initialization failed. Cannot start application.\nPlease check config.ini and network connection.")
              root_err.destroy()
          except Exception as tk_err:
              print(f"[FATAL] Could not even display Tkinter error message: {tk_err}")
@@ -1880,13 +1960,12 @@ if __name__ == "__main__":
 
     def on_closing():
         """Handles window close event, stops cameras, cancels timers, closes DB connection."""
-        ## ANALYSIS: Graceful shutdown procedure. Stops cameras, date/time timer, and closes DB connection.
         print("[INFO] Closing application requested...")
         if messagebox.askokcancel("Quit", "Are you sure you want to quit the Parking Management System?", parent=root):
             print("[INFO] Quitting application...")
 
-            # Cancel the datetime update loop
-            if app.datetime_after_id:
+            # Cancel the datetime update loop only if the main app was built
+            if hasattr(app, 'datetime_after_id') and app.datetime_after_id:
                 try:
                     root.after_cancel(app.datetime_after_id)
                     print("[INFO] Date/time update loop cancelled.")
@@ -1894,14 +1973,18 @@ if __name__ == "__main__":
                     print("[WARN] Could not cancel date/time update loop (already cancelled or window destroyed).")
                 app.datetime_after_id = None
 
-            # Stop cameras on all relevant tabs
-            for tab in (app.entry_tab, app.exit_tab): # Only entry/exit have cameras
-                if tab and hasattr(tab, 'stop_camera') and callable(getattr(tab, 'stop_camera')):
-                    try:
-                        print(f"[INFO] Stopping camera for tab: {tab.winfo_class()}...")
-                        tab.stop_camera()
-                    except Exception as e:
-                        print(f"[ERROR] Error stopping camera during shutdown: {e}")
+            # Stop cameras only if the main app was built and tabs exist
+            if hasattr(app, 'entry_tab') and hasattr(app, 'exit_tab'):
+                tabs_to_check = [app.entry_tab, app.exit_tab] # Add settings tab if it might have camera later
+                # if hasattr(app, 'settings_tab'): tabs_to_check.append(app.settings_tab)
+
+                for tab in tabs_to_check:
+                    if tab and tab.winfo_exists() and hasattr(tab, 'stop_camera') and callable(getattr(tab, 'stop_camera')):
+                        try:
+                            print(f"[INFO] Stopping camera for tab: {tab.winfo_class()}...")
+                            tab.stop_camera()
+                        except Exception as e:
+                            print(f"[ERROR] Error stopping camera during shutdown: {e}")
 
             # Close MongoDB connection
             global client
