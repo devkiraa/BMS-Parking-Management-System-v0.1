@@ -7,8 +7,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox, scrolledtext, filedialog, simpledialog
 from PIL import Image, ImageTk, UnidentifiedImageError
 import cv2
-from datetime import datetime, timedelta, time # Import time for combining date and time
+from datetime import datetime, timedelta, time # Import time class for combining date and time
 import math
+import time as standard_time # Import the standard time module with an alias
 from pymongo import MongoClient
 from bson import ObjectId
 # Make sure google.cloud.vision is installed and authenticated
@@ -17,17 +18,21 @@ try:
     from google.cloud.vision_v1 import AnnotateImageResponse # For error checking
     from google.api_core import exceptions as google_exceptions # For API errors
 except ImportError:
-    messagebox.showerror("Missing Library", "Google Cloud Vision library not found.\nPlease install it: pip install google-cloud-vision")
+    # Use a basic Tk window for the error if the main root isn't available yet
+    root_check = tk.Tk(); root_check.withdraw()
+    messagebox.showerror("Missing Library", "Google Cloud Vision library not found.\nPlease install it: pip install google-cloud-vision", parent=None)
+    root_check.destroy()
     sys.exit(1)
 except Exception as e:
-     messagebox.showerror("Vision Client Error", f"Could not initialize Google Cloud Vision client.\nEnsure credentials are set correctly.\nError: {e}")
+     root_check = tk.Tk(); root_check.withdraw()
+     messagebox.showerror("Vision Client Error", f"Could not initialize Google Cloud Vision client.\nEnsure credentials are set correctly.\nError: {e}", parent=None)
+     root_check.destroy()
      # Optionally exit, or allow running without OCR
      # sys.exit(1)
 
 
 import sys
 import pymongo
-import time
 import traceback
 import configparser
 
@@ -57,16 +62,16 @@ if not os.path.exists(CONFIG_FILE):
         root_check.destroy()
         sys.exit(1)
     except IOError as e:
-         root_check = tk.Tk(); root_check.withdraw()
-         messagebox.showerror("Config Error", f"Could not create config file '{CONFIG_FILE}': {e}", parent=None)
-         root_check.destroy(); sys.exit(1)
+        root_check = tk.Tk(); root_check.withdraw()
+        messagebox.showerror("Config Error", f"Could not create config file '{CONFIG_FILE}': {e}", parent=None)
+        root_check.destroy(); sys.exit(1)
 else:
     try:
         config.read(CONFIG_FILE)
         if not config.has_section('Database') or not config.has_section('Paths'): raise ValueError("Missing sections [Database] or [Paths].")
         if not config.has_option('Database', 'mongodb_uri') or not config.has_option('Paths', 'service_account_json'): raise ValueError("Missing options mongodb_uri or service_account_json.")
         # Check if the placeholder URI is still present
-        if config.get('Database', 'mongodb_uri') == 'YOUR_MONGODB_SRV_URI_HERE':
+        if config.get('Database', 'mongodb_uri') == 'YOUR_MONGODB_SRV_URI_HERE': # Check against the placeholder
             root_check = tk.Tk(); root_check.withdraw()
             messagebox.showerror("Configuration Needed", f"Please edit '{CONFIG_FILE}' and replace 'YOUR_MONGODB_SRV_URI_HERE' with your actual MongoDB connection string.", parent=None)
             root_check.destroy(); sys.exit(1)
@@ -83,9 +88,9 @@ try:
     PARKING_COL_NAME = config.get('Database', 'parking_collection', fallback='parking')
     PROPERTY_COL_NAME = config.get('Database', 'property_collection', fallback='property')
 except configparser.NoOptionError as e:
-     root_check = tk.Tk(); root_check.withdraw(); messagebox.showerror("Config Error", f"Missing required option in '{CONFIG_FILE}': {e}", parent=None); root_check.destroy(); sys.exit(1)
+    root_check = tk.Tk(); root_check.withdraw(); messagebox.showerror("Config Error", f"Missing required option in '{CONFIG_FILE}': {e}", parent=None); root_check.destroy(); sys.exit(1)
 except Exception as e:
-     root_check = tk.Tk(); root_check.withdraw(); messagebox.showerror("Config Error", f"Unexpected error reading config: {e}", parent=None); root_check.destroy(); sys.exit(1)
+    root_check = tk.Tk(); root_check.withdraw(); messagebox.showerror("Config Error", f"Unexpected error reading config: {e}", parent=None); root_check.destroy(); sys.exit(1)
 
 
 if not os.path.exists(SERVICE_ACCOUNT_PATH):
@@ -141,7 +146,7 @@ def find_cameras(max_index=5):
                         cams.append((i, cam_name))
                         print(f"  [OK] Found: {cam_name} (Index {i})")
                     else:
-                         print(f"  [WARN] Could not read frame from index {i}")
+                        print(f"  [WARN] Could not read frame from index {i}")
                 except Exception as e_read:
                     print(f"  [ERROR] reading index {i}: {e_read}")
                 finally:
@@ -154,10 +159,10 @@ def find_cameras(max_index=5):
                 os.dup2(original_stderr, sys.stderr.fileno())
                 os.close(original_stderr)
             except OSError:
-                 print("[WARN] Could not restore stderr after camera detection.")
+                print("[WARN] Could not restore stderr after camera detection.")
         if devnull is not None:
-             try: os.close(devnull)
-             except OSError: pass
+            try: os.close(devnull)
+            except OSError: pass
 
     print(f"Cameras found: {len(cams)}")
     return cams
@@ -190,16 +195,16 @@ def detect_text(image_path):
 
         # Check for API errors in the response itself
         if isinstance(response, AnnotateImageResponse) and response.error.message:
-             raise google_exceptions.GoogleAPICallError(response.error.message)
+            raise google_exceptions.GoogleAPICallError(response.error.message)
         elif not isinstance(response, AnnotateImageResponse):
-             # Handle cases where the response might not be the expected type (unlikely but safe)
-             print(f"[WARN] Unexpected response type from Vision API: {type(response)}")
-             # Attempt to get annotations if possible, otherwise return error
-             texts = getattr(response, 'text_annotations', None)
-             if texts is None:
-                  raise Exception("Vision API returned an unexpected response format.")
+            # Handle cases where the response might not be the expected type (unlikely but safe)
+            print(f"[WARN] Unexpected response type from Vision API: {type(response)}")
+            # Attempt to get annotations if possible, otherwise return error
+            texts = getattr(response, 'text_annotations', None)
+            if texts is None:
+                raise Exception("Vision API returned an unexpected response format.")
         else:
-             texts = response.text_annotations
+            texts = response.text_annotations
 
 
         if not texts:
@@ -211,73 +216,73 @@ def detect_text(image_path):
 
         # Iterate through detected text blocks (skip the first, which is the full text)
         for i, text in enumerate(texts):
-             if i == 0: continue # Skip the full text block initially
+            if i == 0: continue # Skip the full text block initially
 
-             block_text = text.description.upper() # Convert to uppercase
-             compact_raw = re.sub(r'[^A-Z0-9]', '', block_text) # Remove non-alphanumeric
-             if not compact_raw: continue # Skip empty blocks
+            block_text = text.description.upper() # Convert to uppercase
+            compact_raw = re.sub(r'[^A-Z0-9]', '', block_text) # Remove non-alphanumeric
+            if not compact_raw: continue # Skip empty blocks
 
-             # Regex for BH series: YY BH NNNN LL(L)
-             bh_match = re.search(r'^(\d{2})(BH)(\d{4})([A-Z]{1,2})$', compact_raw)
-             if bh_match:
-                 year, bh_marker, nums, letters = bh_match.groups()
-                 formatted_plate = f"{year}-{bh_marker}-{nums}-{letters}"
-                 print(f"[INFO] Found BH plate block {i}: {formatted_plate}")
-                 possible_plates.append(formatted_plate)
-                 continue # Found a match, move to next block
+            # Regex for BH series: YY BH NNNN LL(L)
+            bh_match = re.search(r'^(\d{2})(BH)(\d{4})([A-Z]{1,2})$', compact_raw)
+            if bh_match:
+                year, bh_marker, nums, letters = bh_match.groups()
+                formatted_plate = f"{year}-{bh_marker}-{nums}-{letters}"
+                print(f"[INFO] Found BH plate block {i}: {formatted_plate}")
+                possible_plates.append(formatted_plate)
+                continue # Found a match, move to next block
 
-             # Regex for Standard series: LL NN L(L) NNNN
-             # Made RTO digits (NN) {1,2} and optional letters (L(L)) {1,2}
-             # Made final numbers (NNNN) {3,4}
-             standard_match = re.search(r'^([A-Z]{2})(\d{1,2})([A-Z]{1,2})?(\d{3,4})$', compact_raw)
-             if standard_match:
-                 state, rto, letters, nums = standard_match.groups()
-                 rto_padded = rto.rjust(2, '0') # Pad RTO code if single digit
-                 nums_padded = nums.rjust(4, '0') # Pad final numbers
-                 letters_formatted = letters if letters else 'XX' # Use XX if letters part is missing
-                 formatted_plate = f"{state}-{rto_padded}-{letters_formatted}-{nums_padded}"
-                 print(f"[INFO] Found Standard plate block {i}: {formatted_plate}")
-                 possible_plates.append(formatted_plate)
-                 continue # Found a match
+            # Regex for Standard series: LL NN L(L) NNNN
+            # Made RTO digits (NN) {1,2} and optional letters (L(L)) {1,2}
+            # Made final numbers (NNNN) {3,4}
+            standard_match = re.search(r'^([A-Z]{2})(\d{1,2})([A-Z]{1,2})?(\d{3,4})$', compact_raw)
+            if standard_match:
+                state, rto, letters, nums = standard_match.groups()
+                rto_padded = rto.rjust(2, '0') # Pad RTO code if single digit
+                nums_padded = nums.rjust(4, '0') # Pad final numbers
+                letters_formatted = letters if letters else 'XX' # Use XX if letters part is missing
+                formatted_plate = f"{state}-{rto_padded}-{letters_formatted}-{nums_padded}"
+                print(f"[INFO] Found Standard plate block {i}: {formatted_plate}")
+                possible_plates.append(formatted_plate)
+                continue # Found a match
 
-             # Fallback: If block looks somewhat like a plate (length, mix of letters/numbers)
-             if 6 <= len(compact_raw) <= 10 and re.search(r'\d', compact_raw) and re.search(r'[A-Z]', compact_raw):
-                 print(f"[INFO] Found fallback plate block {i}: {compact_raw}")
-                 possible_plates.append(compact_raw) # Add the raw compact version
+            # Fallback: If block looks somewhat like a plate (length, mix of letters/numbers)
+            if 6 <= len(compact_raw) <= 10 and re.search(r'\d', compact_raw) and re.search(r'[A-Z]', compact_raw):
+                print(f"[INFO] Found fallback plate block {i}: {compact_raw}")
+                possible_plates.append(compact_raw) # Add the raw compact version
 
         # Select the best candidate (prefer formatted ones)
         if possible_plates:
-             # Prefer plates that were formatted (matched regex with hyphens)
-             formatted = [p for p in possible_plates if '-' in p]
-             best_plate = formatted[0] if formatted else possible_plates[0] # Take first formatted, else first found
-             print(f"[INFO] Selecting best plate: {possible_plates} -> {best_plate}")
-             return best_plate
+            # Prefer plates that were formatted (matched regex with hyphens)
+            formatted = [p for p in possible_plates if '-' in p]
+            best_plate = formatted[0] if formatted else possible_plates[0] # Take first formatted, else first found
+            print(f"[INFO] Selecting best plate: {possible_plates} -> {best_plate}")
+            return best_plate
         else:
-             # If no blocks matched, check the full text (texts[0]) as a last resort
-             print("[WARN] No specific blocks matched plate format. Checking full text block.");
-             if texts: # Ensure texts[0] exists
-                 full_text_raw = texts[0].description.upper()
-                 full_compact_raw = re.sub(r'[^A-Z0-9]', '', full_text_raw)
+            # If no blocks matched, check the full text (texts[0]) as a last resort
+            print("[WARN] No specific blocks matched plate format. Checking full text block.");
+            if texts: # Ensure texts[0] exists
+                full_text_raw = texts[0].description.upper()
+                full_compact_raw = re.sub(r'[^A-Z0-9]', '', full_text_raw)
 
-                 # Try matching BH/Standard within the full compact text
-                 bh_match = re.search(r'(\d{2})(BH)(\d{4})([A-Z]{1,2})', full_compact_raw) # Search within
-                 if bh_match:
-                     year, bh_marker, nums, letters = bh_match.groups()
-                     formatted_plate = f"{year}-{bh_marker}-{nums}-{letters}"
-                     print(f"[INFO] Found BH in full text: {formatted_plate}")
-                     return formatted_plate
+                # Try matching BH/Standard within the full compact text
+                bh_match = re.search(r'(\d{2})(BH)(\d{4})([A-Z]{1,2})', full_compact_raw) # Search within
+                if bh_match:
+                    year, bh_marker, nums, letters = bh_match.groups()
+                    formatted_plate = f"{year}-{bh_marker}-{nums}-{letters}"
+                    print(f"[INFO] Found BH in full text: {formatted_plate}")
+                    return formatted_plate
 
-                 standard_match = re.search(r'([A-Z]{2})(\d{1,2})([A-Z]{1,2})?(\d{3,4})', full_compact_raw) # Search within
-                 if standard_match:
-                     state, rto, letters, nums = standard_match.groups()
-                     rto_padded = rto.rjust(2, '0'); nums_padded = nums.rjust(4, '0')
-                     letters_formatted = letters if letters else 'XX'
-                     formatted_plate = f"{state}-{rto_padded}-{letters_formatted}-{nums_padded}"
-                     print(f"[INFO] Found Standard in full text: {formatted_plate}")
-                     return formatted_plate
+                standard_match = re.search(r'([A-Z]{2})(\d{1,2})([A-Z]{1,2})?(\d{3,4})', full_compact_raw) # Search within
+                if standard_match:
+                    state, rto, letters, nums = standard_match.groups()
+                    rto_padded = rto.rjust(2, '0'); nums_padded = nums.rjust(4, '0')
+                    letters_formatted = letters if letters else 'XX'
+                    formatted_plate = f"{state}-{rto_padded}-{letters_formatted}-{nums_padded}"
+                    print(f"[INFO] Found Standard in full text: {formatted_plate}")
+                    return formatted_plate
 
-             print("[WARN] No plate found even in full text.");
-             return "" # Return empty if nothing found
+            print("[WARN] No plate found even in full text.");
+            return "" # Return empty if nothing found
 
     except google_exceptions.GoogleAPICallError as e:
         print(f"[ERROR] Vision API Call Error: {e}")
@@ -381,11 +386,11 @@ class EditableDialog(tk.Toplevel):
             # Call the appropriate callback based on whether confirm was clicked
             # This logic was moved from _confirm and _retake to ensure it runs *after* cleanup
             if self.result_plate: # If _confirm set a result
-                 if callable(self.on_confirm):
-                     self.on_confirm(self.result_plate)
+                if callable(self.on_confirm):
+                    self.on_confirm(self.result_plate)
             else: # Otherwise, assume retake/cancel
-                 if callable(self.on_retake):
-                     self.on_retake()
+                if callable(self.on_retake):
+                    self.on_retake()
 
     def _validate_plate(self, plate_str):
         """Basic validation for number plate format."""
@@ -424,6 +429,15 @@ class ParkingApp:
         # Store camera mapping: Name -> Index for easy lookup
         self.camera_name_to_index = {name: index for index, name in AVAILABLE_CAMERAS}
 
+        # --- Top Bar for Date/Time ---
+        self.top_bar = ttk.Frame(root, padding=(10, 5))
+        self.top_bar.pack(side="top", fill="x")
+
+        self.datetime_label = ttk.Label(self.top_bar, text="Loading date/time...", font=('Segoe UI', 10))
+        self.datetime_label.pack(side="left")
+        self.datetime_after_id = None # To store the 'after' job ID
+        self._update_datetime() # Start the clock
+
         # --- Main Structure: Notebook with Tabs ---
         self.nav = ttk.Notebook(root)
         self.entry_tab = ttk.Frame(self.nav, padding=10)
@@ -433,7 +447,7 @@ class ParkingApp:
         self.nav.add(self.entry_tab, text="🚙 Entry")
         self.nav.add(self.exit_tab, text="🏁 Exit")
         self.nav.add(self.settings_tab, text="⚙️ Settings")
-        self.nav.pack(fill="both", expand=True, padx=5, pady=5)
+        self.nav.pack(fill="both", expand=True, padx=5, pady=(0, 5)) # Reduced pady top
 
         # Build UI elements for each tab
         self._build_tab(self.entry_tab, is_entry=True)
@@ -448,11 +462,24 @@ class ParkingApp:
         # Ensures the window is fully drawn and dimensions are available
         self.root.after(150, self._trigger_initial_camera_start)
 
+    def _update_datetime(self):
+        """Updates the date and time label."""
+        now = datetime.now()
+        # Format: Day, DD Mon YYYY HH:MM:SS AM/PM
+        dt_string = now.strftime("%a, %d %b %Y %I:%M:%S %p")
+        try:
+            self.datetime_label.config(text=dt_string)
+            # Schedule the next update after 1000ms (1 second)
+            self.datetime_after_id = self.root.after(1000, self._update_datetime)
+        except tk.TclError:
+             # Handle error if the widget is destroyed before the update runs (e.g., during closing)
+             print("[INFO] Datetime label update skipped, widget likely destroyed.")
+
     def _on_enter_press(self, event):
         """Handles the Enter key press to trigger capture on the current tab if button enabled."""
         ## ANALYSIS: Convenience feature to trigger capture with Enter key. Checks focus to avoid interfering with text entry.
         focused_widget = self.root.focus_get()
-        # Don't trigger if focus is on an input field
+        # Don't trigger if focus is on an input field or the log text area
         if isinstance(focused_widget, (tk.Entry, ttk.Entry, scrolledtext.ScrolledText, ttk.Combobox)):
             return
 
@@ -465,7 +492,7 @@ class ParkingApp:
             if current_tab_widget in (self.entry_tab, self.exit_tab):
                 if hasattr(current_tab_widget, 'trigger_capture') and callable(getattr(current_tab_widget, 'trigger_capture')):
                     # Also check if the capture button is currently enabled
-                     if hasattr(current_tab_widget, '_btn_capture') and current_tab_widget._btn_capture['state'] == tk.NORMAL:
+                    if hasattr(current_tab_widget, '_btn_capture') and current_tab_widget._btn_capture['state'] == tk.NORMAL:
                         current_tab_widget.trigger_capture() # Call the tab's capture function
         except tk.TclError:
             print("[WARN] Error getting current tab widget on Enter.")
@@ -485,21 +512,28 @@ class ParkingApp:
 
         # Stop camera on any tab that is *not* the newly selected one
         for tab in (self.entry_tab, self.exit_tab, self.settings_tab):
-             if tab and tab != newly_selected_tab_widget:
-                  # Check if the tab has a 'stop_camera' method
-                  if hasattr(tab, 'stop_camera') and callable(getattr(tab, 'stop_camera')):
-                      try:
-                          tab.stop_camera()
-                      except Exception as e:
-                          print(f"[ERROR] Stopping camera on non-active tab change: {e}")
+            if tab and tab != newly_selected_tab_widget:
+                # Check if the tab has a 'stop_camera' method
+                if hasattr(tab, 'stop_camera') and callable(getattr(tab, 'stop_camera')):
+                    try:
+                        tab.stop_camera()
+                    except Exception as e:
+                        print(f"[ERROR] Stopping camera on non-active tab change: {e}")
 
         # Start camera if the new tab is Entry or Exit
         if newly_selected_tab_widget in (self.entry_tab, self.exit_tab):
             if hasattr(newly_selected_tab_widget,'start_camera') and callable(getattr(newly_selected_tab_widget, 'start_camera')):
                 try:
                     newly_selected_tab_widget.start_camera()
+                    # Also refresh logs for the current date when switching to Entry/Exit tab
+                    if hasattr(newly_selected_tab_widget, '_log_date_var'):
+                        self._load_logs(
+                            newly_selected_tab_widget._log_widget,
+                            is_entry=(newly_selected_tab_widget == self.entry_tab),
+                            selected_date_str=newly_selected_tab_widget._log_date_var.get()
+                        )
                 except Exception as e:
-                    print(f"[ERROR] Starting camera on tab change: {e}")
+                    print(f"[ERROR] Starting camera or loading logs on tab change: {e}")
         # Refresh property list if Settings tab is selected
         elif newly_selected_tab_widget == self.settings_tab:
              if hasattr(self.settings_tab, '_load_properties_into_list'):
@@ -516,10 +550,17 @@ class ParkingApp:
             if current_tab_widget in (self.entry_tab, self.exit_tab):
                 if hasattr(current_tab_widget, 'start_camera') and callable(getattr(current_tab_widget, 'start_camera')):
                     current_tab_widget.start_camera()
+                    # Load initial logs for today's date
+                    if hasattr(current_tab_widget, '_log_date_var'):
+                        self._load_logs(
+                            current_tab_widget._log_widget,
+                            is_entry=(current_tab_widget == self.entry_tab),
+                            selected_date_str=current_tab_widget._log_date_var.get() # Should be today's date initially
+                        )
         except tk.TclError:
             print("[WARN] Error getting initial tab widget.")
         except Exception as e:
-            print(f"[ERROR] Starting camera for initial tab: {e}")
+            print(f"[ERROR] Starting camera or loading initial logs: {e}")
             # Update canvas text if camera start fails immediately
             if hasattr(current_tab_widget, '_canvas'):
                 current_tab_widget._canvas.config(text=f"Cam Start Error", image='')
@@ -564,6 +605,12 @@ class ParkingApp:
         s.map("Manual.TButton",
               background=[('active', '#ec971f'), ('disabled', '#d9d9d9')],
               foreground=[('disabled', '#a3a3a3')])
+
+        # Refresh button style (smaller, less prominent)
+        s.configure("Refresh.TButton", font=('Segoe UI', 9), padding=(5, 3))
+        s.map("Refresh.TButton",
+              background=[('active', '#c0c0c0')])
+
 
         # Video canvas style
         s.configure("VideoCanvas.TLabel", background="black", foreground="white", font=('Segoe UI', 14), anchor="center")
@@ -692,8 +739,19 @@ class ParkingApp:
         # --- Log Header ---
         log_header_frame = ttk.Frame(right_frame)
         log_header_frame.grid(row=0, column=0, sticky="ew", pady=(0, 2))
-        ttk.Label(log_header_frame, text=f"📄 {section} Log History", style="Header.TLabel").pack(side="left")
-        # Removed Clear button - log clears on load/save now
+        log_header_frame.columnconfigure(1, weight=1) # Allow date entry to expand
+
+        ttk.Label(log_header_frame, text=f"📄 {section} Log", style="Header.TLabel").pack(side="left", padx=(0,10)) # Removed "History"
+
+        # --- Log Date Selection ---
+        ttk.Label(log_header_frame, text="Date (YYYY-MM-DD):").pack(side="left", padx=(0, 5))
+        log_date_var = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d")) # Default to today
+        log_date_entry = ttk.Entry(log_header_frame, textvariable=log_date_var, width=12)
+        log_date_entry.pack(side="left", padx=(0, 5))
+
+        # Refresh Log Button
+        btn_refresh_log = ttk.Button(log_header_frame, text="🔄", style="Refresh.TButton", width=3)
+        btn_refresh_log.pack(side="left")
 
         # --- Log Display ---
         log = scrolledtext.ScrolledText(right_frame, width=50, height=15, font=("Consolas", 10), wrap=tk.WORD, bg="#ffffff", fg="#333333", relief="solid", borderwidth=1, state=tk.DISABLED)
@@ -751,6 +809,7 @@ class ParkingApp:
         frame._refresh_slots = refresh_slots_typed # Reference to slot refresh function
         frame._vehicle_type_var = vehicle_type_var # Reference to vehicle type variable
         frame._cam_name_var = cam_name_var # Reference to camera selection variable
+        frame._log_date_var = log_date_var # Reference to log date variable
 
         # --- Camera Handling Functions (Specific to this tab) ---
         def update_feed():
@@ -759,7 +818,9 @@ class ParkingApp:
             # Stop if capture device is gone or closed
             if cap is None or not cap.isOpened():
                 if frame._state.get('after_id') is not None:
-                    frame._canvas.after_cancel(frame._state['after_id'])
+                    try:
+                        frame._canvas.after_cancel(frame._state['after_id'])
+                    except tk.TclError: pass # Ignore if already cancelled/destroyed
                     frame._state['after_id'] = None
                 # Optionally update canvas text to 'Camera disconnected' or similar
                 # frame._canvas.config(image='', text="Camera Disconnected")
@@ -793,12 +854,16 @@ class ParkingApp:
             except Exception as e:
                 print(f"[ERROR] in update_feed cam {cam_name_var.get()}: {e}")
                 stop_camera() # Stop feed on error
-                frame._canvas.config(image='', text=f"Feed Error")
-                frame._canvas.imgtk = None
+                try:
+                    frame._canvas.config(image='', text=f"Feed Error")
+                    frame._canvas.imgtk = None
+                except tk.TclError: pass # Ignore if widget destroyed
                 return # Stop the loop
 
             # Schedule the next update
-            frame._state['after_id'] = frame._canvas.after(40, update_feed) # Aim for ~25 FPS
+            try:
+                frame._state['after_id'] = frame._canvas.after(40, update_feed) # Aim for ~25 FPS
+            except tk.TclError: pass # Ignore if widget destroyed
 
         def start_camera(event=None):
             """Initializes and starts the selected camera feed."""
@@ -807,27 +872,34 @@ class ParkingApp:
             selected_cam_index = self.camera_name_to_index.get(selected_cam_name)
 
             if selected_cam_index is None or selected_cam_name == "N/A":
-                frame._canvas.config(text="No Camera Selected", image='')
-                frame._canvas.imgtk = None
-                btn_capture.config(state="disabled", text="🚫 Select Camera")
+                try:
+                    frame._canvas.config(text="No Camera Selected", image='')
+                    frame._canvas.imgtk = None
+                    btn_capture.config(state="disabled", text="🚫 Select Camera")
+                except tk.TclError: pass # Ignore if widget destroyed
                 return
 
             append_log(f"Initializing {selected_cam_name}...")
-            frame._canvas.config(text=f"Starting {selected_cam_name}...", image='')
-            frame._canvas.imgtk = None
-            self.root.update_idletasks() # Force UI update to show "Starting..."
+            try:
+                frame._canvas.config(text=f"Starting {selected_cam_name}...", image='')
+                frame._canvas.imgtk = None
+                self.root.update_idletasks() # Force UI update to show "Starting..."
+            except tk.TclError: pass # Ignore if widget destroyed
 
             cap_api = cv2.CAP_DSHOW if sys.platform == 'win32' else cv2.CAP_ANY
             cap = cv2.VideoCapture(selected_cam_index, cap_api)
-            time.sleep(0.5) # Give camera time to initialize (may need adjustment)
+            # Use the standard time module's sleep (aliased)
+            standard_time.sleep(0.5) # Give camera time to initialize (may need adjustment)
 
             if not cap.isOpened():
                 messagebox.showerror("Camera Error", f"Cannot open {selected_cam_name}", parent=self.root)
                 append_log(f"Failed to open {selected_cam_name}", "ERROR")
                 frame._state['cap'] = None
-                frame._canvas.config(text="Failed to Open", image='')
-                frame._canvas.imgtk = None
-                btn_capture.config(state="disabled", text="🚫 Camera Error")
+                try:
+                    frame._canvas.config(text="Failed to Open", image='')
+                    frame._canvas.imgtk = None
+                    btn_capture.config(state="disabled", text="🚫 Camera Error")
+                except tk.TclError: pass # Ignore if widget destroyed
                 return
 
             # Try a few initial reads to ensure camera is responsive
@@ -835,7 +907,8 @@ class ParkingApp:
             try:
                 for _ in range(5): # Try up to 5 times
                     ok, test_frame = cap.read()
-                    time.sleep(0.05) # Small delay between reads
+                    # Use the standard time module's sleep (aliased)
+                    standard_time.sleep(0.05) # Small delay between reads
                     if ok and test_frame is not None:
                         read_success = True
                         break
@@ -846,23 +919,29 @@ class ParkingApp:
                 frame._state['cap'] = None
                 messagebox.showerror("Camera Error", f"Error reading from {selected_cam_name}: {e}", parent=self.root)
                 append_log(f"Failed initial read {selected_cam_name}: {e}", "ERROR")
-                frame._canvas.config(text="Read Error", image='')
-                frame._canvas.imgtk = None
-                btn_capture.config(state="disabled", text="🚫 Read Error")
+                try:
+                    frame._canvas.config(text="Read Error", image='')
+                    frame._canvas.imgtk = None
+                    btn_capture.config(state="disabled", text="🚫 Read Error")
+                except tk.TclError: pass # Ignore if widget destroyed
                 return
 
             # Store the capture device and start the feed
             frame._state['cap'] = cap
             append_log(f"{section} {selected_cam_name} started.", "INFO")
-            frame._canvas.config(text="") # Clear "Starting..." text
+            try:
+                frame._canvas.config(text="") # Clear "Starting..." text
+            except tk.TclError: pass # Ignore if widget destroyed
 
             # Enable buttons if property is also selected
-            if prop_var.get() and prop_var.get() != "No Properties Found" and prop_var.get() != "DB Error":
-                btn_capture.config(state="normal", text="📸 Capture & Process")
-                btn_manual.config(state="normal")
-            else:
-                btn_capture.config(state="disabled", text="🚫 Select Property")
-                btn_manual.config(state="disabled")
+            try:
+                if prop_var.get() and prop_var.get() != "No Properties Found" and prop_var.get() != "DB Error":
+                    btn_capture.config(state="normal", text="📸 Capture & Process")
+                    btn_manual.config(state="normal")
+                else:
+                    btn_capture.config(state="disabled", text="🚫 Select Property")
+                    btn_manual.config(state="disabled")
+            except tk.TclError: pass # Ignore if buttons destroyed
 
             update_feed() # Start the update loop
 
@@ -870,7 +949,9 @@ class ParkingApp:
             """Stops the camera feed and releases resources."""
             # Cancel any pending frame update
             if frame._state.get('after_id') is not None:
-                frame._canvas.after_cancel(frame._state['after_id'])
+                try:
+                    frame._canvas.after_cancel(frame._state['after_id'])
+                except tk.TclError: pass # Ignore if already cancelled/destroyed
                 frame._state['after_id'] = None
 
             # Release the capture device
@@ -881,20 +962,24 @@ class ParkingApp:
                 append_log(f"Camera {cam_name_var.get()} stopped.", "INFO") # Log stop
 
             # Update UI
-            frame._canvas.config(image='', text="Camera Stopped")
-            frame._canvas.imgtk = None # Clear image reference
+            try:
+                frame._canvas.config(image='', text="Camera Stopped")
+                frame._canvas.imgtk = None # Clear image reference
+            except tk.TclError: pass # Ignore if widget destroyed
 
             # Disable capture button, re-enable manual button if property selected
-            if btn_capture['state'] == tk.NORMAL:
-                 btn_capture.config(state="disabled", text="🚫 Camera Stopped")
-            # Check property status before enabling manual button
-            if prop_var.get() and prop_var.get() != "No Properties Found" and prop_var.get() != "DB Error":
-                 if btn_manual['state'] == tk.DISABLED:
-                     btn_manual.config(state="normal")
-            else:
-                 # Ensure manual button is disabled if no property selected
-                 if btn_manual['state'] == tk.NORMAL:
-                     btn_manual.config(state="disabled")
+            try:
+                if btn_capture['state'] == tk.NORMAL:
+                     btn_capture.config(state="disabled", text="🚫 Camera Stopped")
+                # Check property status before enabling manual button
+                if prop_var.get() and prop_var.get() != "No Properties Found" and prop_var.get() != "DB Error":
+                     if btn_manual['state'] == tk.DISABLED:
+                          btn_manual.config(state="normal")
+                else:
+                     # Ensure manual button is disabled if no property selected
+                     if btn_manual['state'] == tk.NORMAL:
+                          btn_manual.config(state="disabled")
+            except tk.TclError: pass # Ignore if buttons destroyed
 
         # --- Define and Attach Button Commands ---
         # Use lambda or functools.partial if needed, but direct assignment works here
@@ -907,6 +992,11 @@ class ParkingApp:
             self._manual_entry_exit(frame, is_entry, append_log, prop_var.get(), vehicle_type_var.get(), refresh_slots_typed, btn_capture, btn_manual)
         btn_manual.config(command=trigger_manual_local)
 
+        # Attach command to the Refresh Log button
+        def refresh_log_display():
+             self._load_logs(frame._log_widget, is_entry, frame._log_date_var.get())
+        btn_refresh_log.config(command=refresh_log_display)
+
         # --- Attach camera control functions to the frame ---
         frame.start_camera = start_camera
         frame.stop_camera = stop_camera
@@ -914,8 +1004,8 @@ class ParkingApp:
         # Bind camera selection change to restart the camera
         cbcam.bind("<<ComboboxSelected>>", start_camera)
 
-        # Load initial logs for this tab
-        self._load_logs(frame._log_widget, is_entry)
+        # Load initial logs for this tab (will be done by _trigger_initial_camera_start or _on_tab_change)
+        # self._load_logs(frame._log_widget, is_entry, frame._log_date_var.get()) # Moved initial load
 
     # --- Build Settings Tab ---
     def _build_settings_tab(self, frame):
@@ -926,11 +1016,11 @@ class ParkingApp:
         frame.columnconfigure(0, weight=1) # Property list
         frame.columnconfigure(1, weight=2) # Details and Export
         frame.rowconfigure(1, weight=1) # Allow property list to expand
-        frame.rowconfigure(3, weight=1) # Allow export section some space
+        # frame.rowconfigure(3, weight=1) # Allow export section some space - Removed, adjusted grid rows
 
         # --- Property Management Section ---
         prop_mgmt_frame = ttk.LabelFrame(frame, text="Property Management", padding=10)
-        prop_mgmt_frame.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 10), pady=(0, 5))
+        prop_mgmt_frame.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=(0, 10), pady=(0, 5)) # Spans 2 rows now
         prop_mgmt_frame.rowconfigure(0, weight=1) # Treeview expands
         prop_mgmt_frame.columnconfigure(0, weight=1) # Treeview expands
 
@@ -959,7 +1049,7 @@ class ParkingApp:
 
         # --- Details & Fees Section ---
         details_frame = ttk.LabelFrame(frame, text="Details & Fees", padding=10)
-        details_frame.grid(row=0, column=1, sticky="nsew", pady=(0, 5))
+        details_frame.grid(row=0, column=1, sticky="nsew", pady=(0, 5)) # Row 0
         details_frame.columnconfigure(1, weight=1) # Allow entry fields to expand slightly
 
         ttk.Label(details_frame, text="Property Name:").grid(row=0, column=0, sticky="w", padx=5, pady=3)
@@ -1068,13 +1158,17 @@ class ParkingApp:
             self._clear_property_details()
 
     def _clear_property_details(self):
-         """Clears the property detail fields in the settings tab."""
-         self.settings_tab._prop_name_var.set("")
-         self.settings_tab._prop_spaces_car_var.set("")
-         self.settings_tab._prop_spaces_bike_var.set("")
-         self.settings_tab._prop_fee_car_var.set("")
-         self.settings_tab._prop_fee_bike_var.set("")
-         self.settings_tab._selected_prop_id = None # Clear selected ID
+        """Clears the property detail fields in the settings tab."""
+        try:
+            self.settings_tab._prop_name_var.set("")
+            self.settings_tab._prop_spaces_car_var.set("")
+            self.settings_tab._prop_spaces_bike_var.set("")
+            self.settings_tab._prop_fee_car_var.set("")
+            self.settings_tab._prop_fee_bike_var.set("")
+            self.settings_tab._selected_prop_id = None # Clear selected ID
+        except AttributeError:
+            print("[WARN] Could not clear property details, widgets might not exist yet.")
+
 
     def _add_edit_property(self, prop_id=None):
         """Placeholder for Add/Edit Property Dialog."""
@@ -1148,6 +1242,7 @@ class ParkingApp:
                 # Refresh the list to show updated values
                 self.settings_tab._load_properties_into_list()
                 # Refresh property comboboxes on other tabs? Might be needed if names change.
+                self._refresh_property_comboboxes() # Call helper to update comboboxes
             elif result.matched_count > 0:
                 messagebox.showinfo("No Changes", "No changes were detected in the provided details.", parent=self.root)
             else:
@@ -1159,6 +1254,65 @@ class ParkingApp:
         except Exception as e:
             messagebox.showerror("Unexpected Error", f"An unexpected error occurred while saving: {e}", parent=self.root)
             print(f"[ERROR] Unexpected error saving property: {e}")
+
+    def _refresh_property_comboboxes(self):
+        """Refreshes the property selection comboboxes on Entry and Exit tabs."""
+        print("[INFO] Refreshing property comboboxes...")
+        try:
+            props = list(property_col.find({}, {"name": 1}).sort("name", 1))
+            names = [p['name'] for p in props if 'name' in p]
+            property_available = bool(names)
+
+            for tab in (self.entry_tab, self.exit_tab):
+                # Find the specific Combobox widget associated with the property selection
+                # This requires knowing the widget hierarchy or storing a direct reference
+                prop_combo = None
+                try:
+                    # Attempt to find the combobox through the known hierarchy
+                    # Note: This relies on the structure defined in _build_tab and might break if changed
+                    # Assumes left_frame is the first child of the tab frame, prop_frame is the first child of left_frame,
+                    # and the combobox is the second child of prop_frame.
+                    left_frame_widget = tab.winfo_children()[0] # Assuming left_frame is first
+                    prop_frame_widget = left_frame_widget.winfo_children()[0] # Assuming prop_frame is first in left_frame
+                    prop_combo = prop_frame_widget.winfo_children()[1] # Assuming combobox is second in prop_frame (!label, !combobox)
+                    if not isinstance(prop_combo, ttk.Combobox):
+                        print(f"[WARN] Found widget is not a Combobox: {prop_combo}")
+                        prop_combo = None # Reset if it's not the right widget type
+                except (IndexError, AttributeError) as find_e:
+                    print(f"[WARN] Could not find property combobox widget for tab {tab} via hierarchy: {find_e}")
+                    # Fallback: If you stored a direct reference like `tab._prop_combo = cbp` in _build_tab, use that:
+                    # if hasattr(tab, '_prop_combo'):
+                    #     prop_combo = tab._prop_combo
+
+                if hasattr(tab, '_prop_var') and prop_combo:
+                    prop_var = tab._prop_var
+                    current_selection = prop_var.get()
+
+                    prop_combo['values'] = names
+                    if property_available:
+                        prop_combo.config(state="readonly")
+                        # Try to keep selection if it still exists, else select first
+                        if current_selection in names:
+                            prop_var.set(current_selection)
+                        else:
+                            prop_var.set(names[0])
+                        if hasattr(tab, '_refresh_slots') and callable(tab._refresh_slots):
+                            tab._refresh_slots() # Refresh slots based on new selection/list
+                    elif names == ["DB Error"]: # Should not happen if DB was ok before
+                        prop_var.set("DB Error")
+                        prop_combo.config(state="disabled")
+                    else:
+                        prop_var.set("No Properties Found")
+                        prop_combo.config(state="disabled")
+                        if hasattr(tab, '_refresh_slots') and callable(tab._refresh_slots):
+                            tab._refresh_slots() # Refresh slots (will show N/A)
+                elif not prop_combo:
+                    print(f"[WARN] Property combobox widget reference missing for tab {tab}")
+
+
+        except Exception as e:
+            print(f"[ERROR] Failed to refresh property comboboxes: {e}")
+            messagebox.showerror("UI Error", f"Failed to update property lists: {e}", parent=self.root)
 
 
     # --- Capture/Save Logic ---
@@ -1247,10 +1401,15 @@ class ParkingApp:
         # Define callbacks for the dialog
         def on_confirm_callback(edited_plate):
             append_log_func(f"Plate Confirmed/Edited: {edited_plate}", "INFO")
-            btn_capture.config(text="⏳ Saving...") # Update button state before save
-            self.root.update_idletasks()
+            try:
+                btn_capture.config(text="⏳ Saving...") # Update button state before save
+                self.root.update_idletasks()
+            except tk.TclError: pass # Ignore if button destroyed
+
             # Call the save function with the confirmed plate
-            self._save_record(edited_plate, is_entry, append_log_func, prop_name, vehicle_type, refresh_slots)
+            # Pass the log date variable from the tab frame
+            log_date_to_refresh = tab_frame._log_date_var.get() if hasattr(tab_frame, '_log_date_var') else None
+            self._save_record(edited_plate, is_entry, append_log_func, prop_name, vehicle_type, refresh_slots, log_date_to_refresh)
             # Note: Button state is reset within the dialog's destroy binding now
 
         def on_retake_callback():
@@ -1271,8 +1430,10 @@ class ParkingApp:
             messagebox.showerror("Dialog Error", f"Failed to open confirmation dialog:\n{e}", parent=self.root)
             append_log_func(f"Dialog creation error: {e}", "ERROR")
             # Restore button states if dialog fails to open
-            btn_capture.config(state="normal", text=original_capture_text)
-            btn_manual.config(state="normal" if prop_name and prop_name != "No Properties Found" else "disabled")
+            try:
+                btn_capture.config(state="normal", text=original_capture_text)
+                btn_manual.config(state="normal" if prop_name and prop_name != "No Properties Found" else "disabled")
+            except tk.TclError: pass # Ignore if buttons destroyed
             # Clean up the image file if the dialog failed
             if path and os.path.exists(path):
                 try: os.remove(path)
@@ -1307,39 +1468,45 @@ class ParkingApp:
 
         # Update button states before saving
         original_manual_text = btn_manual['text']
-        btn_manual.config(state="disabled", text="⏳ Saving...")
-        btn_capture.config(state="disabled") # Disable capture during manual save
-        self.root.update_idletasks()
+        try:
+            btn_manual.config(state="disabled", text="⏳ Saving...")
+            btn_capture.config(state="disabled") # Disable capture during manual save
+            self.root.update_idletasks()
+        except tk.TclError: pass # Ignore if buttons destroyed
 
         try:
             # Call the same save function
-            self._save_record(plate, is_entry, append_log_func, prop_name, vehicle_type, refresh_slots)
+            # Pass the log date variable from the tab frame
+            log_date_to_refresh = tab_frame._log_date_var.get() if hasattr(tab_frame, '_log_date_var') else None
+            self._save_record(plate, is_entry, append_log_func, prop_name, vehicle_type, refresh_slots, log_date_to_refresh)
         finally:
             # Restore button states after save attempt (success or failure)
-            btn_manual.config(state="normal", text=original_manual_text)
-            # Check camera status before re-enabling capture button
-            is_cam_running = tab_frame._state.get('cap') and tab_frame._state['cap'].isOpened()
-            capture_button_state = "normal" if is_cam_running else "disabled"
-            capture_button_text = "📸 Capture & Process" if is_cam_running else "🚫 Camera Stopped"
-            # Ensure tab_frame has _prop_var before accessing it (should always exist here)
-            if hasattr(tab_frame, '_prop_var'):
-                 # Also check property selection status
-                 if not tab_frame._prop_var.get() or tab_frame._prop_var.get() == "No Properties Found" or tab_frame._prop_var.get() == "DB Error":
-                     capture_button_state = "disabled"
-                     capture_button_text = "🚫 Select Property" if is_cam_running else capture_button_text # Keep camera status text if no prop
+            try:
+                btn_manual.config(state="normal", text=original_manual_text)
+                # Check camera status before re-enabling capture button
+                is_cam_running = tab_frame._state.get('cap') and tab_frame._state['cap'].isOpened()
+                capture_button_state = "normal" if is_cam_running else "disabled"
+                capture_button_text = "📸 Capture & Process" if is_cam_running else "🚫 Camera Stopped"
+                # Ensure tab_frame has _prop_var before accessing it (should always exist here)
+                if hasattr(tab_frame, '_prop_var'):
+                     # Also check property selection status
+                     if not tab_frame._prop_var.get() or tab_frame._prop_var.get() == "No Properties Found" or tab_frame._prop_var.get() == "DB Error":
+                          capture_button_state = "disabled"
+                          capture_button_text = "🚫 Select Property" if is_cam_running else capture_button_text # Keep camera status text if no prop
 
-                 btn_capture.config(state=capture_button_state, text=capture_button_text)
-            else:
-                 # Fallback if _prop_var is missing somehow
-                 btn_capture.config(state="disabled", text=capture_button_text)
+                     btn_capture.config(state=capture_button_state, text=capture_button_text)
+                else:
+                     # Fallback if _prop_var is missing somehow
+                     btn_capture.config(state="disabled", text=capture_button_text)
+            except tk.TclError: pass # Ignore if buttons destroyed
 
 
-    def _save_record(self, plate, is_entry, append_log_func, prop_name, vehicle_type, refresh_slots_func):
-        """Saves entry/exit record to DB, updates slots, calculates fee on exit."""
+    def _save_record(self, plate, is_entry, append_log_func, prop_name, vehicle_type, refresh_slots_func, log_date_to_refresh=None):
+        """Saves entry/exit record to DB, updates slots, calculates fee on exit, and refreshes log for the specified date."""
         ## ANALYSIS: Handles core DB logic for parking entries/exits.
         ## ANALYSIS: Calculates fees based on duration (first hour free). Updates property slots.
         ## ANALYSIS: DB operations can block GUI. Consider threading.
-        ## ANALYSIS: Refreshes the relevant log display after successful save.
+        ## ANALYSIS: Refreshes the relevant log display for the specified date after successful save.
         now = datetime.now()
         v_type_lower = vehicle_type.lower() # Use lowercase for consistency in DB keys
         action = "entry" if is_entry else "exit"
@@ -1404,12 +1571,12 @@ class ParkingApp:
                     # Log to console only
                     append_log_func(f"Entry Saved: {plate} ({vehicle_type}) @ {now:%Y-%m-%d %H:%M:%S}", "SAVE")
                     messagebox.showinfo("Entry Success", f"{vehicle_type} {plate} entry recorded successfully at {prop_name}.", parent=self.root)
-                    # Refresh the visual log display after successful save
-                    self._load_logs(self.entry_tab._log_widget, True) # Refresh entry log display
+                    # Refresh the visual log display for the specified date
+                    self._load_logs(self.entry_tab._log_widget, True, log_date_to_refresh)
                 elif insert_result.inserted_id:
                      append_log_func(f"Entry saved for {plate}, but slot count update failed (maybe already 0?).", "WARN")
                      messagebox.showwarning("DB Warning", "Entry recorded, but failed to update slot count. Please check property details.", parent=self.root)
-                     self._load_logs(self.entry_tab._log_widget, True) # Still refresh log
+                     self._load_logs(self.entry_tab._log_widget, True, log_date_to_refresh) # Still refresh log
                 else:
                      append_log_func(f"Entry DB insert issue for {plate}.", "ERROR")
                      messagebox.showerror("DB Error", "Failed to save entry record to database.", parent=self.root)
@@ -1467,8 +1634,8 @@ class ParkingApp:
                     log_msg = f"Exit Saved: {plate} ({exiting_vehicle_type}) Fee: ₹{calculated_fee:.2f} @ {now:%Y-%m-%d %H:%M:%S}"
                     append_log_func(log_msg, "SAVE") # Log to console
                     messagebox.showinfo("Exit Success", f"Exit recorded for {plate} from {prop_name}.\nCalculated Fee: ₹{calculated_fee:.2f}", parent=self.root)
-                    # Refresh the visual log display after successful save
-                    self._load_logs(self.exit_tab._log_widget, False) # Refresh exit log display
+                    # Refresh the visual log display for the specified date
+                    self._load_logs(self.exit_tab._log_widget, False, log_date_to_refresh)
                 else:
                     # No active session found to update
                     messagebox.showwarning("No Entry Found", f"No active parking session found for {plate} at {prop_name}.", parent=self.root)
@@ -1499,35 +1666,66 @@ class ParkingApp:
                       print(f"[ERROR] Error during final slot refresh in _save_record: {refresh_e}")
 
 
-    def _load_logs(self, log_widget, is_entry):
-        """Loads recent parking records (last 50) into the specified log display."""
-        ## ANALYSIS: Fetches recent records from DB and populates the ScrolledText widget.
-        ## ANALYSIS: Clears previous logs on each load. Shows limited history (50 records).
+    def _load_logs(self, log_widget, is_entry, selected_date_str=None):
+        """Loads parking records for a specific date into the specified log display."""
+        ## ANALYSIS: Fetches records from DB for a given date and populates the ScrolledText widget.
+        ## ANALYSIS: Clears previous logs on each load. Handles date parsing.
         section = "Entry" if is_entry else "Exit"
+
+        # Parse the selected date
+        if selected_date_str is None:
+            selected_date_str = datetime.now().strftime("%Y-%m-%d") # Default to today if none provided
+
+        try:
+            selected_date = datetime.strptime(selected_date_str, "%Y-%m-%d")
+            # Use datetime.combine and the imported time class (from datetime import time)
+            # This should now work correctly because 'time' refers to the class
+            start_of_day = datetime.combine(selected_date.date(), time.min)
+            end_of_day = datetime.combine(selected_date.date(), time.max)
+            date_header = selected_date.strftime("%Y-%m-%d") # For the log title
+        except ValueError:
+            messagebox.showerror("Invalid Date", f"Invalid date format: '{selected_date_str}'. Please use YYYY-MM-DD.", parent=self.root)
+            # Optionally clear the log or show an error message in it
+            log_widget.config(state=tk.NORMAL)
+            log_widget.delete('1.0', tk.END)
+            log_widget.insert("end", f"Invalid date format entered: {selected_date_str}\n")
+            log_widget.config(state=tk.DISABLED)
+            return
+
         # Enable widget, clear, add header, disable again
         log_widget.config(state=tk.NORMAL)
         log_widget.delete('1.0', tk.END)
-        log_widget.insert("end", f"📄 Recent {section} Log (Last 50):\n" + "="*40 + "\n") # Header
+        log_widget.insert("end", f"📄 {section} Log for: {date_header}\n" + "="*40 + "\n") # Header with date
         log_widget.config(state=tk.DISABLED)
 
-        print(f"[INFO] Loading recent {section.lower()} logs for display...") # Console log
+        print(f"[INFO] Loading {section.lower()} logs for display date: {date_header}...") # Console log
 
         try:
-            # Define query based on whether it's entry (exit_time is None) or exit (exit_time exists)
-            query = {"exit_time": None} if is_entry else {"exit_time": {"$ne": None}}
-            # Sort by entry time for entries, exit time for exits (most recent first)
-            sort_key = "entry_time" if is_entry else "exit_time"
+            # Define query based on whether it's entry or exit and the date range
+            if is_entry:
+                # Find entries *on* this day that are still active (no exit time)
+                query = {
+                    "entry_time": {"$gte": start_of_day, "$lte": end_of_day},
+                    "exit_time": None
+                }
+                sort_key = "entry_time" # Sort entries by entry time
+            else:
+                # Find exits *on* this day
+                query = {
+                    "exit_time": {"$gte": start_of_day, "$lte": end_of_day}
+                }
+                sort_key = "exit_time" # Sort exits by exit time
 
-            # Fetch last 50 records matching the criteria
-            recent_records = parking_col.find(query).sort(sort_key, pymongo.DESCENDING).limit(50)
+            # Fetch records matching the criteria for the selected day
+            records_cursor = parking_col.find(query).sort(sort_key, pymongo.DESCENDING)
 
-            records_list = list(recent_records) # Execute query and get list
+            records_list = list(records_cursor) # Execute query and get list
 
             if not records_list:
                 log_widget.config(state=tk.NORMAL)
-                log_widget.insert(tk.END, f"No recent {section.lower()} records found.\n")
+                log_widget.insert(tk.END, f"No {section.lower()} records found for {date_header}.\n")
                 log_widget.config(state=tk.DISABLED)
-                print(f"[INFO] No recent {section.lower()} records found in DB.")
+                print(f"[INFO] No {section.lower()} records found in DB for {date_header}.")
             else:
                 log_lines = []
                 for record in records_list: # Iterate through the fetched list
@@ -1538,8 +1736,8 @@ class ParkingApp:
                         icon = "🟢" if is_entry else "🔴" # Green for entry, Red for exit
                         plate = record.get('vehicle_no', 'N/A')
                         v_type = record.get('vehicle_type', '')
-                        # Format timestamp consistently
-                        time_str = ts.strftime('%Y-%m-%d %H:%M:%S')
+                        # Format timestamp consistently (only time needed as date is in header)
+                        time_str = ts.strftime('%H:%M:%S')
                         type_str = f" ({v_type})" if v_type else ""
 
                         # Format the log line with padding for alignment
@@ -1553,15 +1751,15 @@ class ParkingApp:
 
                         log_lines.append(log_line + "\n")
                     else:
-                         # Handle records with missing/invalid timestamps if necessary
-                         log_lines.append(f"Invalid record timestamp: ID {record.get('_id')}\n")
+                        # Handle records with missing/invalid timestamps if necessary
+                        log_lines.append(f"Invalid record timestamp: ID {record.get('_id')}\n")
 
 
                 if log_lines:
-                     log_widget.config(state=tk.NORMAL)
-                     log_widget.insert(tk.END, "".join(log_lines)) # Insert all lines at once
-                     log_widget.config(state=tk.DISABLED)
-                print(f"[INFO] Displayed {len(log_lines)} {section.lower()} log entries.")
+                    log_widget.config(state=tk.NORMAL)
+                    log_widget.insert(tk.END, "".join(log_lines)) # Insert all lines at once
+                    log_widget.config(state=tk.DISABLED)
+                print(f"[INFO] Displayed {len(log_lines)} {section.lower()} log entries for {date_header}.")
 
         except pymongo.errors.ConnectionFailure as e:
             print(f"[ERROR] DB Connection Error loading logs: {e}")
@@ -1584,7 +1782,9 @@ class ParkingApp:
             end_date_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
 
             # To include records *on* the end date, query up to the end of that day
-            end_date_exclusive = datetime.combine(end_date_dt, time.max) # Use time.max for end of day
+            # Use datetime.combine and the imported time class (from datetime import time)
+            # This should now work correctly because 'time' refers to the class
+            end_date_exclusive = datetime.combine(end_date_dt, time.max)
 
         except ValueError:
             messagebox.showerror("Invalid Date", "Please enter dates in YYYY-MM-DD format.", parent=self.root)
@@ -1613,8 +1813,8 @@ class ParkingApp:
             # Query based on entry_time being within the range
             query = {
                 "entry_time": {
-                    "$gte": start_date,          # Greater than or equal to start date (00:00:00)
-                    "$lte": end_date_exclusive   # Less than or equal to end date (23:59:59.999999)
+                    "$gte": start_date,         # Greater than or equal to start date (00:00:00)
+                    "$lte": end_date_exclusive  # Less than or equal to end date (23:59:59.999999)
                 }
             }
             records_cursor = parking_col.find(query).sort("entry_time", pymongo.ASCENDING) # Sort chronologically
@@ -1679,11 +1879,21 @@ if __name__ == "__main__":
     app = ParkingApp(root)
 
     def on_closing():
-        """Handles window close event, stops cameras, closes DB connection."""
-        ## ANALYSIS: Graceful shutdown procedure. Stops cameras and closes DB connection.
+        """Handles window close event, stops cameras, cancels timers, closes DB connection."""
+        ## ANALYSIS: Graceful shutdown procedure. Stops cameras, date/time timer, and closes DB connection.
         print("[INFO] Closing application requested...")
         if messagebox.askokcancel("Quit", "Are you sure you want to quit the Parking Management System?", parent=root):
             print("[INFO] Quitting application...")
+
+            # Cancel the datetime update loop
+            if app.datetime_after_id:
+                try:
+                    root.after_cancel(app.datetime_after_id)
+                    print("[INFO] Date/time update loop cancelled.")
+                except tk.TclError:
+                    print("[WARN] Could not cancel date/time update loop (already cancelled or window destroyed).")
+                app.datetime_after_id = None
+
             # Stop cameras on all relevant tabs
             for tab in (app.entry_tab, app.exit_tab): # Only entry/exit have cameras
                 if tab and hasattr(tab, 'stop_camera') and callable(getattr(tab, 'stop_camera')):
