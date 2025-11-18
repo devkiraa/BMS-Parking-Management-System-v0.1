@@ -12,6 +12,8 @@ import math
 import time as standard_time # Import the standard time module with an alias
 from pymongo import MongoClient
 from bson import ObjectId
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 # Make sure google.cloud.vision is installed and authenticated
 try:
     from google.cloud import vision
@@ -488,12 +490,14 @@ class ParkingApp:
         self.nav = ttk.Notebook(self.main_app_frame)
         self.entry_tab = ttk.Frame(self.nav, padding=10)
         self.exit_tab  = ttk.Frame(self.nav, padding=10)
+        self.dashboard_tab = ttk.Frame(self.nav, padding=10)
         self.settings_tab = ttk.Frame(self.nav, padding=10)
 
         self.nav.add(self.entry_tab, text="🚙 Entry")
         self.nav.add(self.exit_tab, text="🏁 Exit")
         # Only show settings tab for managers (optional)
         if self.logged_in_user_role == 'manager':
+            self.nav.add(self.dashboard_tab, text="📊 Dashboard")
             self.nav.add(self.settings_tab, text="⚙️ Settings")
 
         self.nav.pack(fill="both", expand=True, padx=5, pady=(0, 5)) # Reduced pady top
@@ -502,6 +506,7 @@ class ParkingApp:
         self._build_tab(self.entry_tab, is_entry=True)
         self._build_tab(self.exit_tab, is_entry=False)
         if self.logged_in_user_role == 'manager':
+            self._build_dashboard_tab(self.dashboard_tab)
             self._build_settings_tab(self.settings_tab)
 
         # Bind events
@@ -578,8 +583,11 @@ class ParkingApp:
 
         # Determine which tabs exist based on role
         active_tabs = [self.entry_tab, self.exit_tab]
-        if self.logged_in_user_role == 'manager' and hasattr(self, 'settings_tab'):
-             active_tabs.append(self.settings_tab)
+        if self.logged_in_user_role == 'manager':
+             if hasattr(self, 'dashboard_tab'):
+                 active_tabs.append(self.dashboard_tab)
+             if hasattr(self, 'settings_tab'):
+                 active_tabs.append(self.settings_tab)
 
         # Stop camera on any tab that is *not* the newly selected one
         for tab in active_tabs:
@@ -605,6 +613,10 @@ class ParkingApp:
                         )
                 except Exception as e:
                     print(f"[ERROR] Starting camera or loading logs on tab change: {e}")
+        # Refresh dashboard if that tab is selected
+        elif newly_selected_tab_widget == self.dashboard_tab:
+            if hasattr(self, '_refresh_dashboard_data'):
+                self._refresh_dashboard_data()
         # Refresh property list (now just details) if Settings tab is selected
         elif newly_selected_tab_widget == self.settings_tab:
              if hasattr(self.settings_tab, '_load_assigned_property_details'):
@@ -1061,6 +1073,161 @@ class ParkingApp:
         cbcam.bind("<<ComboboxSelected>>", start_camera)
 
         # Load initial logs for this tab (will be done by _trigger_initial_camera_start or _on_tab_change)
+
+    # --- Build Dashboard Tab ---
+    def _build_dashboard_tab(self, frame):
+        """Builds the UI for the Dashboard tab (Manager role only)."""
+        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(2, weight=1)
+
+        # --- Metrics Frame ---
+        metrics_frame = ttk.Frame(frame, padding=10)
+        metrics_frame.grid(row=0, column=0, columnspan=3, sticky="ew")
+        metrics_frame.columnconfigure(0, weight=1)
+        metrics_frame.columnconfigure(1, weight=1)
+        metrics_frame.columnconfigure(2, weight=1)
+        metrics_frame.columnconfigure(3, weight=1)
+
+
+        # Today's Revenue
+        revenue_frame = ttk.LabelFrame(metrics_frame, text="Today's Revenue", padding=10)
+        revenue_frame.grid(row=0, column=0, padx=5, pady=5, sticky="nsew")
+        self.revenue_label = ttk.Label(revenue_frame, text="₹ 0.00", font=("Segoe UI", 20, "bold"))
+        self.revenue_label.pack()
+
+        # Today's Entries
+        entries_frame = ttk.LabelFrame(metrics_frame, text="Today's Entries", padding=10)
+        entries_frame.grid(row=0, column=1, padx=5, pady=5, sticky="nsew")
+        self.entries_label = ttk.Label(entries_frame, text="0", font=("Segoe UI", 20, "bold"))
+        self.entries_label.pack()
+
+        # Today's Exits
+        exits_frame = ttk.LabelFrame(metrics_frame, text="Today's Exits", padding=10)
+        exits_frame.grid(row=0, column=2, padx=5, pady=5, sticky="nsew")
+        self.exits_label = ttk.Label(exits_frame, text="0", font=("Segoe UI", 20, "bold"))
+        self.exits_label.pack()
+
+        # Refresh Button
+        refresh_button = ttk.Button(metrics_frame, text="🔄 Refresh", command=self._refresh_dashboard_data)
+        refresh_button.grid(row=0, column=3, padx=10, pady=10, sticky="e")
+
+
+        # --- Occupancy Frame ---
+        occupancy_frame = ttk.LabelFrame(frame, text="Current Occupancy", padding=10)
+        occupancy_frame.grid(row=1, column=0, columnspan=2, padx=5, pady=5, sticky="nsew")
+        occupancy_frame.columnconfigure(0, weight=1)
+        occupancy_frame.columnconfigure(1, weight=1)
+
+        ttk.Label(occupancy_frame, text="Cars:", font=("Segoe UI", 12)).grid(row=0, column=0, sticky="w")
+        self.occupancy_car_label = ttk.Label(occupancy_frame, text="0 / 0", font=("Segoe UI", 12, "bold"))
+        self.occupancy_car_label.grid(row=0, column=1, sticky="e")
+
+        ttk.Label(occupancy_frame, text="Bikes:", font=("Segoe UI", 12)).grid(row=1, column=0, sticky="w")
+        self.occupancy_bike_label = ttk.Label(occupancy_frame, text="0 / 0", font=("Segoe UI", 12, "bold"))
+        self.occupancy_bike_label.grid(row=1, column=1, sticky="e")
+
+
+        # --- Chart Frame ---
+        chart_frame = ttk.LabelFrame(frame, text="7-Day Revenue Trend", padding=10)
+        chart_frame.grid(row=2, column=0, columnspan=3, padx=5, pady=5, sticky="nsew")
+
+        # Placeholder for the chart
+        self.chart_canvas_placeholder = ttk.Label(chart_frame, text="Chart will be displayed here.", anchor="center")
+        self.chart_canvas_placeholder.pack(fill="both", expand=True)
+
+        # Initial data load
+        self.root.after(100, self._refresh_dashboard_data)
+
+    def _refresh_dashboard_data(self):
+        """Fetches and displays the latest dashboard metrics."""
+        print("Refreshing dashboard data...")
+
+        if not self.assigned_property_doc:
+            messagebox.showwarning("Dashboard Error", "Assigned property not loaded.", parent=self.root)
+            return
+
+        prop_id = self.assigned_property_doc.get('_id')
+        now = datetime.now()
+        start_of_day = datetime.combine(now.date(), time.min)
+        end_of_day = datetime.combine(now.date(), time.max)
+
+        try:
+            # --- Today's Revenue ---
+            revenue_pipeline = [
+                {"$match": {"property_id": prop_id, "exit_time": {"$gte": start_of_day, "$lte": end_of_day}}},
+                {"$group": {"_id": None, "total_revenue": {"$sum": "$fee"}}}
+            ]
+            revenue_result = list(parking_col.aggregate(revenue_pipeline))
+            today_revenue = revenue_result[0]['total_revenue'] if revenue_result else 0
+            self.revenue_label.config(text=f"₹ {today_revenue:,.2f}")
+
+            # --- Today's Entries & Exits ---
+            entries_count = parking_col.count_documents({"property_id": prop_id, "entry_time": {"$gte": start_of_day, "$lte": end_of_day}})
+            exits_count = parking_col.count_documents({"property_id": prop_id, "exit_time": {"$gte": start_of_day, "$lte": end_of_day}})
+            self.entries_label.config(text=str(entries_count))
+            self.exits_label.config(text=str(exits_count))
+
+            # --- Current Occupancy ---
+            total_car_spaces = self.assigned_property_doc.get("parking_spaces_car", 0)
+            avail_car_spaces = self.assigned_property_doc.get("available_parking_spaces_car", 0)
+            occupied_car = total_car_spaces - avail_car_spaces
+            self.occupancy_car_label.config(text=f"{occupied_car} / {total_car_spaces}")
+
+            total_bike_spaces = self.assigned_property_doc.get("parking_spaces_bike", 0)
+            avail_bike_spaces = self.assigned_property_doc.get("available_parking_spaces_bike", 0)
+            occupied_bike = total_bike_spaces - avail_bike_spaces
+            self.occupancy_bike_label.config(text=f"{occupied_bike} / {total_bike_spaces}")
+
+            # --- 7-Day Revenue Chart ---
+            self._update_revenue_chart()
+
+        except pymongo.errors.PyMongoError as e:
+            messagebox.showerror("Database Error", f"Failed to fetch dashboard data:\n{e}", parent=self.root)
+            print(f"[ERROR] Dashboard data fetch error: {e}")
+
+    def _update_revenue_chart(self):
+        """Fetches 7-day revenue data and updates the chart."""
+        prop_id = self.assigned_property_doc.get('_id')
+        today = datetime.now()
+        dates = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
+        revenue_by_day = {date: 0 for date in dates}
+
+        start_date = today - timedelta(days=6)
+        start_of_period = datetime.combine(start_date.date(), time.min)
+
+        pipeline = [
+            {"$match": {"property_id": prop_id, "exit_time": {"$gte": start_of_period}}},
+            {"$group": {
+                "_id": {"$dateToString": {"format": "%Y-%m-%d", "date": "$exit_time"}},
+                "daily_revenue": {"$sum": "$fee"}
+            }}
+        ]
+        result = list(parking_col.aggregate(pipeline))
+        for item in result:
+            if item['_id'] in revenue_by_day:
+                revenue_by_day[item['_id']] = item['daily_revenue']
+
+        # --- Create Chart ---
+        fig = Figure(figsize=(5, 2.5), dpi=100)
+        ax = fig.add_subplot(111)
+
+        days = [datetime.strptime(d, "%Y-%m-%d").strftime("%a") for d in revenue_by_day.keys()]
+        revenues = list(revenue_by_day.values())
+
+        ax.bar(days, revenues, color='#0078d4')
+        ax.set_ylabel("Revenue (₹)")
+        ax.set_title("Revenue Last 7 Days")
+        fig.tight_layout()
+
+        # --- Embed in Tkinter ---
+        if hasattr(self, 'chart_canvas'):
+            self.chart_canvas.get_tk_widget().destroy()
+
+        self.chart_canvas = FigureCanvasTkAgg(fig, master=self.chart_canvas_placeholder)
+        self.chart_canvas.draw()
+        self.chart_canvas.get_tk_widget().pack(fill="both", expand=True)
+
 
     # --- Build Settings Tab ---
     def _build_settings_tab(self, frame):
