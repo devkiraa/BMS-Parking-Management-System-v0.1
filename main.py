@@ -43,6 +43,8 @@ import sys
 import pymongo
 import traceback
 import configparser
+from ocr_services.google_vision import GoogleVisionOcr
+from ocr_services.tesseract import TesseractOcr
 
 # ---- CONFIGURATION ----
 CONFIG_FILE = "config.ini"
@@ -190,132 +192,6 @@ def find_cameras(max_index=5):
 
 AVAILABLE_CAMERAS = find_cameras(5) # Check first 5 indices
 
-# --- Google Cloud Vision OCR ---
-def detect_text(image_path):
-    """Detects text (potential number plate) in an image, handling standard Indian and BH series formats."""
-    ## ANALYSIS: Uses Google Vision API. Includes regex for Indian plates. Handles API errors.
-    ## ANALYSIS: Could be improved with more sophisticated text block analysis or image pre-processing.
-    try:
-        v_client = vision.ImageAnnotatorClient()
-    except Exception as e:
-        print(f"[ERROR] Initializing Vision Client: {e}")
-        return f"OCR Failed: Vision Client Init Error - {e}" # Return error string
-
-    try:
-        if not os.path.exists(image_path):
-            raise FileNotFoundError(f"Image file not found: {image_path}")
-
-        with io.open(image_path, 'rb') as f:
-            content = f.read()
-        image = vision.Image(content=content)
-
-        # Add language hint for better accuracy with English characters/numerals
-        image_context = vision.ImageContext(language_hints=["en"])
-
-        response = v_client.text_detection(image=image, image_context=image_context)
-
-        # Check for API errors in the response itself
-        if isinstance(response, AnnotateImageResponse) and response.error.message:
-            raise google_exceptions.GoogleAPICallError(response.error.message)
-        elif not isinstance(response, AnnotateImageResponse):
-            # Handle cases where the response might not be the expected type (unlikely but safe)
-            print(f"[WARN] Unexpected response type from Vision API: {type(response)}")
-            # Attempt to get annotations if possible, otherwise return error
-            texts = getattr(response, 'text_annotations', None)
-            if texts is None:
-                raise Exception("Vision API returned an unexpected response format.")
-        else:
-            texts = response.text_annotations
-
-
-        if not texts:
-            print("[INFO] Vision API found no text.")
-            return "" # Return empty string if no text found
-
-        print(f"[INFO] Vision API returned {len(texts)} text blocks.")
-        possible_plates = []
-
-        # Iterate through detected text blocks (skip the first, which is the full text)
-        for i, text in enumerate(texts):
-            if i == 0: continue # Skip the full text block initially
-
-            block_text = text.description.upper() # Convert to uppercase
-            compact_raw = re.sub(r'[^A-Z0-9]', '', block_text) # Remove non-alphanumeric
-            if not compact_raw: continue # Skip empty blocks
-
-            # Regex for BH series: YY BH NNNN LL(L)
-            bh_match = re.search(r'^(\d{2})(BH)(\d{4})([A-Z]{1,2})$', compact_raw)
-            if bh_match:
-                year, bh_marker, nums, letters = bh_match.groups()
-                formatted_plate = f"{year}-{bh_marker}-{nums}-{letters}"
-                print(f"[INFO] Found BH plate block {i}: {formatted_plate}")
-                possible_plates.append(formatted_plate)
-                continue # Found a match, move to next block
-
-            # Regex for Standard series: LL NN L(L) NNNN
-            # Made RTO digits (NN) {1,2} and optional letters (L(L)) {1,2}
-            # Made final numbers (NNNN) {3,4}
-            standard_match = re.search(r'^([A-Z]{2})(\d{1,2})([A-Z]{1,2})?(\d{3,4})$', compact_raw)
-            if standard_match:
-                state, rto, letters, nums = standard_match.groups()
-                rto_padded = rto.rjust(2, '0') # Pad RTO code if single digit
-                nums_padded = nums.rjust(4, '0') # Pad final numbers
-                letters_formatted = letters if letters else 'XX' # Use XX if letters part is missing
-                formatted_plate = f"{state}-{rto_padded}-{letters_formatted}-{nums_padded}"
-                print(f"[INFO] Found Standard plate block {i}: {formatted_plate}")
-                possible_plates.append(formatted_plate)
-                continue # Found a match
-
-            # Fallback: If block looks somewhat like a plate (length, mix of letters/numbers)
-            if 6 <= len(compact_raw) <= 10 and re.search(r'\d', compact_raw) and re.search(r'[A-Z]', compact_raw):
-                print(f"[INFO] Found fallback plate block {i}: {compact_raw}")
-                possible_plates.append(compact_raw) # Add the raw compact version
-
-        # Select the best candidate (prefer formatted ones)
-        if possible_plates:
-            # Prefer plates that were formatted (matched regex with hyphens)
-            formatted = [p for p in possible_plates if '-' in p]
-            best_plate = formatted[0] if formatted else possible_plates[0] # Take first formatted, else first found
-            print(f"[INFO] Selecting best plate: {possible_plates} -> {best_plate}")
-            return best_plate
-        else:
-            # If no blocks matched, check the full text (texts[0]) as a last resort
-            print("[WARN] No specific blocks matched plate format. Checking full text block.");
-            if texts: # Ensure texts[0] exists
-                full_text_raw = texts[0].description.upper()
-                full_compact_raw = re.sub(r'[^A-Z0-9]', '', full_text_raw)
-
-                # Try matching BH/Standard within the full compact text
-                bh_match = re.search(r'(\d{2})(BH)(\d{4})([A-Z]{1,2})', full_compact_raw) # Search within
-                if bh_match:
-                    year, bh_marker, nums, letters = bh_match.groups()
-                    formatted_plate = f"{year}-{bh_marker}-{nums}-{letters}"
-                    print(f"[INFO] Found BH in full text: {formatted_plate}")
-                    return formatted_plate
-
-                standard_match = re.search(r'([A-Z]{2})(\d{1,2})([A-Z]{1,2})?(\d{3,4})', full_compact_raw) # Search within
-                if standard_match:
-                    state, rto, letters, nums = standard_match.groups()
-                    rto_padded = rto.rjust(2, '0'); nums_padded = nums.rjust(4, '0')
-                    letters_formatted = letters if letters else 'XX'
-                    formatted_plate = f"{state}-{rto_padded}-{letters_formatted}-{nums_padded}"
-                    print(f"[INFO] Found Standard in full text: {formatted_plate}")
-                    return formatted_plate
-
-            print("[WARN] No plate found even in full text.");
-            return "" # Return empty if nothing found
-
-    except google_exceptions.GoogleAPICallError as e:
-        print(f"[ERROR] Vision API Call Error: {e}")
-        return f"OCR Failed: API Error - {e}" # Return specific error
-    except FileNotFoundError as e:
-        print(f"[ERROR] {e}")
-        return f"OCR Failed: File not found" # Return specific error
-    except Exception as e:
-        print(f"[ERROR] Error during text detection: {e}")
-        traceback.print_exc() # Print stack trace for debugging
-        return f"OCR Failed: {e}" # Return generic error
-
 # --- Editable Dialog for Plate Correction ---
 class EditableDialog(tk.Toplevel):
     """Dialog for confirming or correcting the detected license plate."""
@@ -446,6 +322,13 @@ class ParkingApp:
         root.configure(bg="#f0f0f0") # Base background color
 
         self._make_styles() # Apply custom ttk styles
+
+        # --- OCR Service ---
+        ocr_provider = config.get('OCR', 'provider', fallback='google_vision')
+        if ocr_provider == 'tesseract':
+            self.ocr_service = TesseractOcr()
+        else:
+            self.ocr_service = GoogleVisionOcr()
 
         # Store camera mapping: Name -> Index for easy lookup
         self.camera_name_to_index = {name: index for index, name in AVAILABLE_CAMERAS}
@@ -1504,7 +1387,7 @@ class ParkingApp:
             return
 
         # --- Perform OCR ---
-        plate = detect_text(path)
+        plate = self.ocr_service.detect_text(path)
         append_log_func(f"OCR Result: '{plate}'" if plate and not plate.startswith("OCR Failed") else f"OCR Result: {plate if plate else 'No plate detected'}", "OCR")
 
         # --- Show Confirmation Dialog ---
